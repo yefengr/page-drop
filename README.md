@@ -6,16 +6,15 @@
 
 ## 快速开始
 
-以下为单机部署示例。`pages.example.com` 是示例域名，须替换为自己的域名。
+本项目包括运行在 Docker Compose 中的服务、宿主机 Caddy 配置示例、本地 Python CLI 和可选 AI 技能包。完整步骤见 **[部署与使用指南](docs/guide.md)**：
 
-1. 准备 Linux 服务器、Docker Compose、Caddy 和指向服务器的域名；确认系统时间已同步，`18090` 端口空闲且磁盘空间充足。远程 SSH 用户须能直接写入 `/srv/page-drop`、执行 `install -o` 和运行 Docker；部署脚本不会自动使用 sudo。
-2. 在服务器创建 `/srv/page-drop/.env`，权限设为 `0600`。参照 `deploy/env.example` 设置独立生成的随机 `PAGE_DROP_TOKEN` 和自己的 `PAGE_DROP_PUBLIC_URL`（HTTPS 地址）。不要将 `.env` 或 Token 提交到仓库；部署脚本不会自动生成或覆盖它。
-3. 将 `deploy/Caddyfile.page-drop` 中的示例域名替换为自己的域名，将站点配置加入服务器 Caddy 配置，校验后重新加载 Caddy。确认 DNS、TLS 和防火墙允许访问。
-4. 在项目目录执行 `HOST=你的SSH主机 ./deploy/deploy.sh`。该脚本通过 SSH 同步代码、创建数据目录并构建启动服务；它不会部署或修改 Caddy 配置。默认目标目录为 `/srv/page-drop`，可通过 `REMOTE` 指定其他绝对路径。
-5. 在本机创建 `~/.config/page-drop/config.json`（目录权限 `0700`、文件权限 `0600`），将 `base_url` 设为相同的 HTTPS 地址，例如 `{"base_url":"https://pages.example.com"}`。通过安全渠道将同一 Token 保存到 `~/.config/page-drop/token`（`0600`）；不要向他人或 AI 提供 Token。也可通过 `PAGE_DROP_TOKEN` 环境变量提供。
-6. 在项目目录运行 `python3 cli/publish ./dist --ttl 7d --dry-run` 检查静态目录，再去掉 `--dry-run` 发布。CLI 可按需安装到 PATH；详见 [使用参考](skills/page-drop/references/usage.md)。
+1. 准备 Linux 服务器、Docker Compose、Caddy、域名和时间同步。
+2. 配置服务端 Token 与 HTTPS 地址，通过 SSH 部署服务并验证健康状态。
+3. 配置本地 CLI，预检静态目录后发布；按需安装 AI 技能。
 
-本文件后续章节记录业务契约、部署约束与验收要求。请在自己的环境中完成验证；原 `edge-publish` 数据不会自动迁移。
+指南还包含开发测试、日志查看、升级、备份和故障排查。以下章节记录业务契约与实现边界。
+
+请在自己的环境中完成验证；原 `edge-publish` 数据不会自动迁移。
 
 ## 1. 目标与非目标
 
@@ -415,7 +414,7 @@ publish url <uuid>
 | 数据故障处理 | 静态审查 DB 失败与孤儿回收分支 | DB 不可信时无删除；未知目录先记账并隔离，不以 mtime 直接清理 |
 | 响应头 | HTML、资源、跳转和错误 | 均含 no-store/noindex/nosniff/no-referrer |
 | 容器与健康 | 用户、端口、进程数、文件锁、健康检查及资源配置 | 非 root、只读根、仅回环监听、单实例；不把 unhealthy 等同自动重启 |
-| 技能 | 跨项目触发、缺参数、缺 Token、已有 pending | 正确加载、先询问、不绕过 CLI，不自行丢弃待确认结果 |
+| 技能 | 跨项目触发、未指定有效期、缺 Token、已有 pending | 正确加载；未指定有效期默认 3 天，其他必要信息缺失时先询问；不绕过 CLI，不自行丢弃待确认结果 |
 
 ## 15. 已知取舍
 

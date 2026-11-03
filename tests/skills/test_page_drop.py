@@ -88,6 +88,15 @@ def test_documented_commands_match_cli_parser(publish_cli, argv, capsys):
     # 只解析，不调用 args.func，避免示例中的发布、删除或恢复产生副作用。
 
 
+def test_skill_default_ttl_is_explicit_and_valid(publish_cli):
+    skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    reference = (SKILL_DIR / "references" / "usage.md").read_text(encoding="utf-8")
+    assert "预检和正式发布均默认 `3d`" in skill
+    assert "用户明确指定的有效期优先" in skill
+    assert "CLI 本身仍要求显式提供 `--ttl`" in reference
+    assert publish_cli.parse_ttl("3d") == 3 * 24 * 60 * 60
+
+
 def test_documented_dry_run_needs_no_token_or_network(publish_cli, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(publish_cli, "CONFIG_DIR", tmp_path / "config")
     monkeypatch.setattr(publish_cli, "LEGACY_CONFIG_DIR", tmp_path / "legacy-config")
@@ -102,7 +111,7 @@ def test_documented_dry_run_needs_no_token_or_network(publish_cli, tmp_path, mon
         pytest.fail("仅预检不应发送网络请求")
 
     monkeypatch.setattr(publish_cli, "request", unexpected_request)
-    assert publish_cli.main([str(site), "--ttl", "90m", "--dry-run", "--json"]) == 0
+    assert publish_cli.main([str(site), "--ttl", "3d", "--dry-run", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["dry_run"] is True
     assert not (tmp_path / "state" / "pending.json").exists()
 
