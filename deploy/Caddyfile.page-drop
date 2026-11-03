@@ -1,0 +1,18 @@
+# 追加到 /etc/caddy/Caddyfile，然后 caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy
+# 将 pages.example.com 替换为自己的域名，并与 PAGE_DROP_PUBLIC_URL 保持一致
+# BEGIN page-drop site
+pages.example.com {
+	encode zstd gzip
+
+	header {
+		>X-Robots-Tag "noindex, nofollow, noarchive, noimageindex"
+		>Referrer-Policy "no-referrer"
+		>Cache-Control "no-store"
+		>X-Content-Type-Options "nosniff"
+	}
+
+	reverse_proxy 127.0.0.1:18090 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}
+# END page-drop site

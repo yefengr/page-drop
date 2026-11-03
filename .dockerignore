@@ -1,0 +1,15 @@
+.git
+.gitignore
+.venv
+.venv-dev
+.pytest_cache
+.ruff_cache
+__pycache__
+*.py[cod]
+data
+docs
+tests
+cli
+skills
+.pi
+README.md

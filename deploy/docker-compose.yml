@@ -1,0 +1,39 @@
+services:
+  page-drop:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: page-drop:local
+    container_name: page-drop
+    restart: unless-stopped
+    env_file:
+      - ${PAGE_DROP_ENV_FILE:-${EDGE_PUBLISH_ENV_FILE:-.env}}
+    environment:
+      PAGE_DROP_DATA_DIR: /data
+      PAGE_DROP_PUBLIC_URL: ${PAGE_DROP_PUBLIC_URL:-${EDGE_PUBLISH_PUBLIC_URL:?Set PAGE_DROP_PUBLIC_URL or EDGE_PUBLISH_PUBLIC_URL}}
+    ports:
+      - "127.0.0.1:18090:18090"
+    volumes:
+      - ${PAGE_DROP_DATA_DIR:-${EDGE_PUBLISH_DATA_DIR:?Set PAGE_DROP_DATA_DIR or EDGE_PUBLISH_DATA_DIR}}:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    mem_limit: 256m
+    cpus: 1.0
+    init: true
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:18090/healthz', timeout=3).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
