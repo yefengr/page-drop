@@ -60,6 +60,8 @@ def test_deploy_uses_named_project_and_existing_token(fake_ssh):
         names = archive.getnames()
     assert ".dockerignore" in names
     assert "LICENSE" in names
+    assert "docs/guide.md" in names
+    assert "docs/specification.md" in names
     assert all("__pycache__" not in Path(name).parts and not name.endswith(".pyc") for name in names)
     assert all(not any(part.startswith("._") for part in Path(name).parts) for name in names)
 

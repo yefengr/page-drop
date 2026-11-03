@@ -9,7 +9,7 @@ PageDrop 由自托管的 Docker 服务、本地 `publish` CLI 和可选的 AI �
 - 一台能通过 SSH 管理的 Linux 服务器，安装 Docker、Docker Compose 插件和 Caddy；Compose 需支持 `up --wait` 和 `--wait-timeout`。
 - 一个指向服务器的域名；为 Caddy 的 HTTPS 证书准备可用的 DNS、80/443 端口和防火墙规则。
 - 本地安装 Git、Python 3、SSH 和支持部署脚本所用选项的 `tar`；CLI 仅使用 Python 标准库。服务器需要 `curl`、用于生成 Token 的 `openssl`，并能够构建 Python 镜像和获取依赖。
-- 确认服务器时间同步，`127.0.0.1:18090` 未被占用，`/srv` 所在磁盘有足够余量。服务设置了上传磁盘余量保护，并不代替容量规划；限制见 [README 的配额章节](../README.md#8-配额与容量)。
+- 确认服务器时间同步，`127.0.0.1:18090` 未被占用，`/srv` 所在磁盘有足够余量。服务设置了上传磁盘余量保护，并不代替容量规划；限制见[技术契约的配额章节](specification.md#8-配额与容量)。
 - 部署脚本通过 SSH 执行命令，不会自动使用 `sudo`。远程用户需要有权限创建和写入目标目录、执行 `install -o` 设置 UID 10001 的属主、运行 Docker；请按自己的安全策略配置权限。
 
 在本地获取代码：
@@ -128,7 +128,7 @@ curl -i http://127.0.0.1:18090/healthz
 | 401 | 本地 Token 来源是否与服务器一致；不要输出 Token。 |
 | 503 | 服务日志、存储可用性和健康状态；数据库不可信时保留现场，不手工删除数据。 |
 | 507 | 内容配额及服务器磁盘余量；不要为释放空间盲目删除数据目录。 |
-| 上传结果不确定 | 保留本地 pending，先阅读 [恢复说明](../README.md#retry-与本地收尾)；不要直接重复发布或丢弃。 |
+| 上传结果不确定 | 保留本地 pending，先阅读[恢复说明](specification.md#retry-与本地收尾)；不要直接重复发布或丢弃。 |
 
 ### 更新与备份
 
@@ -148,4 +148,4 @@ python3 -m venv .venv
 
 部署测试使用本地假 SSH；部分 Compose 配置测试需要 Docker Compose CLI。没有 Docker 时，相关测试会跳过，不能将跳过视为部署验收。可只运行相关目录，例如 `.venv/bin/python -m pytest -q tests/cli tests/skills`。自动化测试不能替代目标服务器的 DNS、TLS、容器和真实页面验收。
 
-项目边界、API、数据恢复和验收矩阵以 [README](../README.md) 为准；当前项目没有独立维护的 API SDK 或生产环境托管服务。
+项目边界、API、数据恢复和验收矩阵以[技术契约](specification.md)为准；当前项目没有独立维护的 API SDK 或生产环境托管服务。

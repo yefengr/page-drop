@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PageDrop 本地 CLI：打包、上传、查询、删除。
 
-单文件、仅标准库。业务契约见仓库 README.md。
+单文件、仅标准库。业务契约见仓库 docs/specification.md。
 """
 
 import argparse

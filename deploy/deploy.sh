@@ -20,7 +20,7 @@ ssh "$HOST" "test -s '$REMOTE/.env' || { echo '缺少非空 .env；请先安全�
 echo "== 同步源码到 $HOST:$SRC =="
 ssh "$HOST" "mkdir -p '$SRC' && rm -rf '$SRC/service' '$SRC/deploy' '$SRC/cli' '$SRC/skills'"
 COPYFILE_DISABLE=1 tar -C "$ROOT" --no-xattrs --exclude='__pycache__' --exclude='*.pyc' --exclude='.DS_Store' \
-  -czf - service deploy cli skills README.md LICENSE .dockerignore \
+  -czf - service deploy cli skills README.md docs/guide.md docs/specification.md LICENSE .dockerignore \
   | ssh "$HOST" "tar -xzf - -C '$SRC'"
 
 echo "== 数据目录与属主 =="
