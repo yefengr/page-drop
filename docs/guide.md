@@ -63,7 +63,7 @@ curl -i http://127.0.0.1:18090/healthz
 
 ## 4. 配置本地 CLI
 
-CLI 位于仓库的 `cli/publish`，无需安装 Python 第三方依赖。创建本地目录和配置文件，目录使用 `0700`、文件使用 `0600`：
+CLI 实现在 `skills/page-drop/scripts/publish`，只需要 Python 3 标准库；仓库的 `cli/publish` 是转发到该实现的兼容入口。完整复制 `skills/page-drop/` 即可脱离仓库使用 CLI，不必安装全局命令。服务部署、地址和凭据仍需另行配置。创建本地目录和配置文件，目录使用 `0700`、文件使用 `0600`：
 
 ```bash
 mkdir -p "$HOME/.config/page-drop"
@@ -94,11 +94,11 @@ python3 cli/publish ./dist --ttl 7d --json
 
 `./dist` 是示例，替换为实际目录。注意 stderr 中关于站点根路径资源的警告：页面位于 UUID 子路径，绝对资源路径可能加载失败。正式发布成功后，以 CLI 返回的链接和到期时间为准，并检查页面及关键资源。查询、删除与上传结果不确定时的恢复命令见 [CLI 使用参考](../skills/page-drop/references/usage.md#参数与命令)；`retry` 可能重发原归档，`discard-pending` 不会删除服务端发布。
 
-如希望直接使用 `publish` 命令，可按 [安装参考](../skills/page-drop/references/usage.md#cli-缺失或不可执行) 将 CLI 链接到自己的 PATH；不要覆盖已有同名命令。
+如希望直接使用 `publish` 命令，可按 [入口说明](../skills/page-drop/references/usage.md#技能包与-cli-入口) 将 CLI 链接到自己的 PATH；这是可选便利，不要覆盖已有同名命令。
 
 ## 5. 安装 AI 技能（可选）
 
-技能包在 [`skills/page-drop/`](../skills/page-drop/)，包含 `SKILL.md` 和引用资料。它编排 CLI，不会替代服务部署、CLI 安装或 Token 配置。安装前请阅读技能内容，并根据所用 AI 工具的技能发现规则安装整个目录，不要只复制 `SKILL.md`。
+技能包在 [`skills/page-drop/`](../skills/page-drop/)，包含 `SKILL.md`、CLI 脚本、引用资料和许可证。它自带 CLI，不需要另行安装全局命令，但不会替代服务部署、地址或 Token 配置。安装前请阅读技能内容，并根据所用 AI 工具的技能发现规则复制整个目录，不要只复制 `SKILL.md`。
 
 以 Pi 的默认用户级技能目录为例，在本地项目根目录执行：
 

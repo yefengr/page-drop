@@ -5,7 +5,9 @@ description: 通过 publish CLI 将本地静态 HTML 目录发布成带有效期
 
 # PageDrop
 
-只编排现有 CLI，不自行实现上传。服务端负责 TTL、配额和回收。安装、配置、完整命令及维护验收见 [使用参考](references/usage.md)，需要时再读。
+只编排技能目录自带的 CLI，不自行实现上传。服务端负责 TTL、配额和回收。安装、配置、完整命令及维护验收见 [使用参考](references/usage.md)，需要时再读。
+
+从实际加载的 `SKILL.md` 路径确定当前技能目录；下文命令中的 `<当前技能目录>` 是占位符，执行时必须替换为已确认的绝对路径并保留引号。默认使用 `python3 "<当前技能目录>/scripts/publish"`，不依赖特定 harness 环境变量或全局 `publish` 命令。
 
 ## 先区分任务
 
@@ -17,11 +19,11 @@ description: 通过 publish CLI 将本地静态 HTML 目录发布成带有效期
 | 删除发布 | 确认唯一 UUID 和删除授权后使用 rm；不要求本地目录或 TTL |
 | 恢复未确认上传 | 进入下文恢复流程；不要求源目录仍存在，不重新打包 |
 
-收到 URL 时只提取其中明确的发布 UUID，仍以已配置的服务为目标；不要据此改配置。目标服务不符、目标不唯一或只有模糊标题时，先澄清，可用 `publish list --json` 辅助定位，不猜测删除对象。
+收到 URL 时只提取其中明确的发布 UUID，仍以已配置的服务为目标；不要据此改配置。目标服务不符、目标不唯一或只有模糊标题时，先澄清，可用 `python3 "<当前技能目录>/scripts/publish" list --json` 辅助定位，不猜测删除对象。
 
 ## 前置与授权
 
-- 确认 `publish` 可执行（`command -v publish`）且 Python 3 可用。缺失时按使用参考说明安装方式；未经授权不安装、不覆盖现有入口。
+- 确认 Python 3 可用，以及实际加载的技能目录内 `scripts/publish` 存在且可读。缺失时说明缺口并停止，不自动联网下载、安装工具或修改 PATH；全局 `publish` 仅是可选便利入口。
 - 需要联网的命令须显式配置自部署服务的 `base_url`；没有默认服务器。dry-run 和 discard-pending 不需要地址。缺少配置时提示用户自行配置，不擅自指定服务或改动配置。
 - 需要联网的命令使用 CLI 的凭据规则：非空 `PAGE_DROP_TOKEN` 优先，其次兼容 `EDGE_PUBLISH_TOKEN`，否则使用选定配置中的 `token_file` 或其目录内的默认 `token`。优先使用 `~/.config/page-drop/config.json`；不存在时兼容 `~/.config/edge-publish/config.json`；均不存在时依次查找新、旧目录的 `token`。正式请求前只检查是否可用，不索取或输出 Token，不用文件读取或环境转储把凭据带入对话。dry-run 与 discard-pending 不要求 Token。
 - **发布即公开**：知道 UUID 链接的人都能访问。涉及个人信息、内部资料、密钥、未公开数据或需要鉴权的材料时停止。只发布用户信任的 HTML/JavaScript；同域内容不是隔离沙箱，不托管不可信第三方页面。
@@ -31,25 +33,25 @@ description: 通过 publish CLI 将本地静态 HTML 目录发布成带有效期
 ## 新发布流程
 
 1. 确认目标是静态产物目录，根级有 `index.html`，不含符号链接、点开头文件、`.git/`、`node_modules/`。已有可用产物直接使用；需要构建时按项目流程执行，不发布源码目录，不为通过校验擅自删除文件。
-2. 执行 `publish <dir> --ttl <ttl> --dry-run --json`，同时检查退出码、stdout JSON 与 stderr，汇报文件数、内容大小和归档大小。校验失败或超限则停止；已有 pending 转入恢复流程。
+2. 执行 `python3 "<当前技能目录>/scripts/publish" <dir> --ttl <ttl> --dry-run --json`，同时检查退出码、stdout JSON 与 stderr，汇报文件数、内容大小和归档大小。校验失败或超限则停止；已有 pending 转入恢复流程。
 3. 检查 stderr 中的站点根 URL 警告，例如 `/assets/app.js` 或 `<base href="/">`。它们不会导致 CLI 失败，却可能让 UUID 子路径下的页面缺资源。先解释风险，经授权修正构建配置或产物后重新预检；用户明确接受该风险才可不修正继续。不自动改写 HTML，也不把没有警告当作页面可用证明。
-4. 授权齐备且预检通过后，执行 `publish <dir> --ttl <ttl> [--title "<标题>"] [--label "<标签>"] --json`。预检后目录、内容或参数变化时，重新预检；公开范围变化还需重新确认。
+4. 授权齐备且预检通过后，执行 `python3 "<当前技能目录>/scripts/publish" <dir> --ttl <ttl> [--title "<标题>"] [--label "<标签>"] --json`。预检后目录、内容或参数变化时，重新预检；公开范围变化还需重新确认。
 5. 仅在 CLI 确认成功后交付返回的 `url` 与 `expires_at`；时间按明确时区展示，不自行拼接域名、UUID 或另算过期时间。区分上传成功与页面可用：交付目标包含可用预览或此前有资源路径警告时，用浏览器检查返回页面和关键资源；未验证或验证受阻须说明。验收失败不自动重新发布或删除。
 
 ## 查询与删除
 
-- 查询优先使用 `publish list --json`、`publish status <uuid> --json`；需要包含非可用项时才加 `--all`。问“还能访问吗”以 status 的 `available` 为准，不根据历史记录、expires_at 或本机时钟推断。
-- 取回当前可访问链接可用 `publish url <uuid>`，不从 UUID 自行拼接地址。
-- 明确目标和删除授权后执行 `publish rm <uuid>`，以 CLI 结果汇报。删除只关闭后续访问，不保证磁盘已立即回收，也不能撤回转发、缓存或截图。
+- 查询优先使用 `python3 "<当前技能目录>/scripts/publish" list --json`、`python3 "<当前技能目录>/scripts/publish" status <uuid> --json`；需要包含非可用项时才加 `--all`。问“还能访问吗”以 status 的 `available` 为准，不根据历史记录、expires_at 或本机时钟推断。
+- 取回当前可访问链接可用 `python3 "<当前技能目录>/scripts/publish" url <uuid>`，不从 UUID 自行拼接地址。
+- 明确目标和删除授权后执行 `python3 "<当前技能目录>/scripts/publish" rm <uuid>`，以 CLI 结果汇报。删除只关闭后续访问，不保证磁盘已立即回收，也不能撤回转发、缓存或截图。
 
 ## 恢复、失败与中断
 
 已有 pending 会阻止新发布和 dry-run。新发布失败后也可能留下 pending，不能只按错误码判断它已清除。
 
-1. 先区分“确认原上传”与“发布修改后的内容”。`publish retry --json` 会先查询，符合 CLI 重试条件时可能重发**原归档**，不是纯查询；只有用户已授权恢复这次原上传时才执行一次。不要自动处理与当前任务无关的 pending。
+1. 先区分“确认原上传”与“发布修改后的内容”。`python3 "<当前技能目录>/scripts/publish" retry --json` 会先查询，符合 CLI 重试条件时可能重发**原归档**，不是纯查询；只有用户已授权恢复这次原上传时才执行一次。不要自动处理与当前任务无关的 pending。
 2. retry 不重新打包。源目录修改、移动或删除，不会更新原快照；想发布修改后的内容必须走新发布流程，不能编辑 pending、替换归档或手工改 key。
 3. 同时检查 retry 的 stdout 和 stderr，不只看退出码：仍在处理中时可能返回 0 但没有成功 JSON，应汇报仍在处理；仅从本地 history 完成收尾时可能返回历史 URL，但不代表当前可访问。对历史结果用 status 查询 `available`，查询失败则明确可用性未确认。
-4. 需要放弃旧记录时，先说明“远端可能已经发布，丢弃不等于删除，且会移除本地恢复材料”。只有用户明确授权丢弃后才执行 `publish discard-pending`，不能把“继续发布”自动解释为丢弃授权；之后若仍需新发布，重新预检并核对授权。
+4. 需要放弃旧记录时，先说明“远端可能已经发布，丢弃不等于删除，且会移除本地恢复材料”。只有用户明确授权丢弃后才执行 `python3 "<当前技能目录>/scripts/publish" discard-pending`，不能把“继续发布”自动解释为丢弃授权；之后若仍需新发布，重新预检并核对授权。
 
 | 情况 | 处理 |
 | --- | --- |

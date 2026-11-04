@@ -12,26 +12,41 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SKILL_DIR = ROOT / "skills" / "page-drop"
+SKILL_SCRIPT = SKILL_DIR / "scripts" / "publish"
 DOCUMENTS = sorted(SKILL_DIR.rglob("*.md"))
 
 
-def command_examples():
+def shell_commands():
     for path in DOCUMENTS:
         in_shell = False
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if line.startswith("```"):
                 in_shell = line.strip() in ("```bash", "```sh")
                 continue
-            if in_shell and line.strip().startswith("publish "):
-                yield f"{path.relative_to(ROOT)}:{number}", shlex.split(line.strip())[1:]
+            if in_shell and line.strip():
+                yield path, number, shlex.split(line.strip())
+
+
+def command_examples():
+    """文档命令统一写成 python3 "<当前技能目录>/scripts/publish" <参数>。"""
+    for path, number, tokens in shell_commands():
+        if len(tokens) >= 2 and tokens[0] == "python3" and tokens[1].endswith("/scripts/publish"):
+            label = f"{path.relative_to(ROOT)}:{number}"
+            assert len(tokens) >= 3, f"{label} 缺少 CLI 参数"
+            yield label, tokens[2:]
 
 
 EXAMPLES = list(command_examples())
+LEGACY_EXAMPLES = [
+    f"{path.relative_to(ROOT)}:{number}"
+    for path, number, tokens in shell_commands()
+    if tokens and tokens[0] == "publish"
+]
 
 
 @pytest.fixture(scope="module")
 def publish_cli():
-    loader = importlib.machinery.SourceFileLoader("skill_publish_cli", str(ROOT / "cli" / "publish"))
+    loader = importlib.machinery.SourceFileLoader("skill_publish_cli", str(SKILL_SCRIPT))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
@@ -48,7 +63,14 @@ def test_skill_frontmatter_is_discoverable():
     assert len(name) <= 64
     assert re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name)
     assert 0 < len(fields["description"]) <= 1024
+
+
+def test_documented_shell_examples_call_skill_script():
     assert EXAMPLES, "技能包应提供可验证的 CLI 命令示例"
+    assert not LEGACY_EXAMPLES, (
+        "文档代码块仍直接调用 publish，改用 python3 \"<当前技能目录>/scripts/publish\"："
+        + ", ".join(LEGACY_EXAMPLES)
+    )
 
 
 @pytest.mark.parametrize("path", DOCUMENTS, ids=lambda path: str(path.relative_to(ROOT)))

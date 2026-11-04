@@ -14,11 +14,14 @@ from pathlib import Path
 
 import pytest
 
-CLI_PATH = Path(__file__).resolve().parents[2] / "cli" / "publish"
+ROOT = Path(__file__).resolve().parents[2]
+# 旧入口只做兼容转发，仍供 test_contract_fixes 的子进程用例比对；业务测试导入技能内唯一实现。
+CLI_PATH = ROOT / "cli" / "publish"
+IMPLEMENTATION_PATH = ROOT / "skills" / "page-drop" / "scripts" / "publish"
 
 
 def load_cli():
-    loader = importlib.machinery.SourceFileLoader("publish_cli", str(CLI_PATH))
+    loader = importlib.machinery.SourceFileLoader("publish_cli", str(IMPLEMENTATION_PATH))
     spec = importlib.util.spec_from_loader("publish_cli", loader)
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
@@ -327,7 +330,10 @@ def test_retry_rejects_naive_timestamp(cli, site, capsys):
     assert cli.main([str(site), "--ttl", "1d"]) == 2
     pending_path = cli.state_dir / "pending.json"
     pending = json.loads(pending_path.read_text())
-    pending["first_attempt_at"] = "2026-11-03T14:36:15"
+    # 使用相对当前时间的 25 小时前无时区时间，避免固定日期进入 24 小时窗口。
+    pending["first_attempt_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=25)
+    ).replace(tzinfo=None).isoformat()
     pending_path.write_text(json.dumps(pending))
     cli.stub_state.fail_post = False
 

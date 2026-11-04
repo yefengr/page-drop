@@ -292,7 +292,7 @@ pages.example.com {
 
 ## 10. 本地 CLI
 
-位置：项目中的 `cli/publish`；单文件 Python 3（仅标准库），运行于 macOS/Linux。使用前确认 Python 3 可用；如需直接使用 `publish` 命令，请自行安装到 PATH。
+实现位于项目的 `skills/page-drop/scripts/publish`；单文件 Python 3（仅标准库），运行于 macOS/Linux。完整复制技能目录后可独立使用；项目中的 `cli/publish` 是兼容转发入口。使用前确认 Python 3 可用；全局 `publish` 命令仅为可选便利，不是依赖。以下示例中的 `publish` 代表调用该 CLI。
 
 ```bash
 publish <dir> --ttl 7d [--title "说明"] [--label "机器名"] [--dry-run]   # 新发布
@@ -367,7 +367,7 @@ publish url <uuid>
 | 2. 服务实现 | 上传、清单、SQLite、准入、配额、租约、清理与恢复 | 相关单元验证通过，阻塞 I/O 不占用事件循环 |
 | 3. 本地 CLI | 归档快照、摘要、幂等查询、上传、本地锁与收尾 | 成功及不确定结果可恢复，不覆盖 pending，不重新打包 retry |
 | 4. 容器化 | Dockerfile、compose、非 root、单实例、只读根与健康检查 | 本地容器集成验证通过，资源与进程边界符合本文 |
-| 5. AI 技能包 | SKILL.md、usage 参考、用户级安装 | 跨项目可发现；授权、缺参数、缺 Token 和 pending 边界明确 |
+| 5. AI 技能包 | 自包含 SKILL.md、scripts/publish、usage 参考与 LICENSE | 复制目录即可使用；跨项目可发现；授权、缺参数、缺 Token 和 pending 边界明确 |
 | 6. 部署 | 完成第 12 节门禁，再部署目录、容器、Caddy 与 DNS | 经授权执行；Caddy 校验通过、已有站点无回归 |
 | 7. 端到端验收 | 真实发布一个临时产物 | 页面与资源正常；到期后新请求 404；读租约结束后清理并释放占用 |
 

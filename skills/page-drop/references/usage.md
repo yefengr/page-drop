@@ -2,23 +2,22 @@
 
 本文件补充安装、参数和维护验收，不另设发布流程。授权、公开边界和 pending 决策以 [主技能](../SKILL.md) 为准。
 
-## CLI 缺失或不可执行
+## 技能包与 CLI 入口
 
-1. CLI 为项目的 `cli/publish`，面向 macOS/Linux，依赖 PATH 中的 Python 3，仅使用标准库。先确认 `command -v python3` 与 `command -v publish`；已有入口时用 `publish --help` 核对是否为本工具。
-2. 缺失时说明安装方式，不自行下载替代脚本或实现上传。用户授权安装后，确认可信仓库绝对路径、文件执行权限与用户 bin 目录是否在 PATH 中。
-3. 可将该仓库的 `cli/publish` 软链接到用户 bin 目录。例如，确认 `~/.local/bin` 在 PATH 中、目标入口不存在且用户同意后，才执行下例；替换占位路径，不原样执行。
+完整复制技能目录即可携带 CLI 和本参考资料；运行只需要 Python 3 标准库，支持 macOS/Linux，不需要 Git 仓库、开发虚拟环境或全局 `publish`。服务仍需另行部署，联网命令还需配置服务地址和凭据。脚本内的开发契约注释可能指向仓库技术文档，仅作维护说明；独立分发以本参考和 `SKILL.md` 为准，运行时不读取该文档。
+
+从实际加载的 `SKILL.md` 所在路径确定当前技能目录，不假设 harness 专属环境变量。以下 `<当前技能目录>` 是说明用占位符：执行前必须替换为已确认的绝对路径，路径带空格时保留引号。例如：
 
 ```bash
-mkdir -p "$HOME/.local/bin"
-ln -s "<可信仓库绝对路径>/cli/publish" "$HOME/.local/bin/publish"
-publish --help
+python3 "<当前技能目录>/scripts/publish" --help
 ```
 
-不使用强制覆盖；已有文件或软链接先核对用途。软链接依赖仓库原位置，移动仓库后需重新核对。缺少 Python、PATH 不正确或文件无执行权限时，说明具体缺口，未经授权不修改公共环境。
+缺少 Python 或技能内脚本时说明缺口并停止，不自动联网下载、安装工具或修改 PATH。用户可以另行授权将技能内脚本或开发仓库的兼容入口链接到 PATH，作为可选便利；先确认目标不存在，不覆盖已有文件，移动原目录后须重新核对链接。
 
 ## 配置与凭据
 
 - 配置文件优先使用 `~/.config/page-drop/config.json`；不存在时兼容旧的 `~/.config/edge-publish/config.json`。两份配置均不存在时，依次选择新、旧目录中已存在的 `token`；均无时使用新目录默认值。字段包括 `base_url`、`token_file`、`timeout`；不合并新旧配置，也不硬编码服务域名。
+- 配置和 Token 保留在用户私有位置；锁、临时归档、pending 和 history 使用 `~/.local/state/publish/`，不写入技能目录。
 - 凭据优先级：非空 `PAGE_DROP_TOKEN` → 非空旧 `EDGE_PUBLISH_TOKEN` → 所选配置指定的 `token_file` → 所选配置目录中的 `token`。仅检查存在性、可读性和有效配置，不输出 Token 或整份环境变量；检查脚本仅返回布尔结果或脱敏错误。
 - 配置与 Token 文件权限按项目约定为 `0600`；需要修正权限时先取得对应授权。凭据由用户在本地配置，不通过对话传递。
 - 需要联网的命令必须显式配置自部署服务的 `base_url`，没有默认服务器；线上地址必须为 HTTPS。dry-run 与 discard-pending 不需要地址。存在 pending 时，不为恢复上传擅自改 base_url；CLI 会拒绝向不同目标发送原归档。
@@ -36,40 +35,40 @@ publish --help
 仅本地预检：
 
 ```bash
-publish ./dist --ttl 3d --dry-run --json
+python3 "<当前技能目录>/scripts/publish" ./dist --ttl 3d --dry-run --json
 ```
 
 正式发布：
 
 ```bash
-publish ./dist --ttl 3d --title "评审稿" --label "评审机" --json
+python3 "<当前技能目录>/scripts/publish" ./dist --ttl 3d --title "评审稿" --label "评审机" --json
 ```
 
 查询与取回链接：
 
 ```bash
-publish list --json
-publish list --all --json
-publish status "<uuid>" --json
-publish url "<uuid>"
+python3 "<当前技能目录>/scripts/publish" list --json
+python3 "<当前技能目录>/scripts/publish" list --all --json
+python3 "<当前技能目录>/scripts/publish" status "<uuid>" --json
+python3 "<当前技能目录>/scripts/publish" url "<uuid>"
 ```
 
 删除指定发布：
 
 ```bash
-publish rm "<uuid>"
+python3 "<当前技能目录>/scripts/publish" rm "<uuid>"
 ```
 
 确认或重发原归档：
 
 ```bash
-publish retry --json
+python3 "<当前技能目录>/scripts/publish" retry --json
 ```
 
 明确放弃本地恢复材料：
 
 ```bash
-publish discard-pending
+python3 "<当前技能目录>/scripts/publish" discard-pending
 ```
 
 ## 维护验收场景
