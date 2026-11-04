@@ -304,7 +304,7 @@ publish rm <uuid>
 publish url <uuid>
 ```
 
-配置：必须显式设置自部署服务的 `base_url`；本地 `--dry-run` 与 `discard-pending` 无需服务地址。优先读取 `~/.config/page-drop/config.json`（0600，含 `base_url`、`token_file`、`timeout`）；不存在时兼容旧的 `~/.config/edge-publish/config.json`，不合并两份文件。两份配置都不存在时，按新、旧目录顺序选择已存在的 `token`，若均无则使用新目录默认值。Token 依次取非空 `PAGE_DROP_TOKEN`、旧 `EDGE_PUBLISH_TOKEN`、配置的 `token_file` 或所选配置目录下的 `token`（0600）。CLI 遵循 `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` 与 `NO_PROXY`，目前仅支持 `http://` 代理地址，其他代理协议明确报错。HTTPS 目标经 CONNECT 隧道：代理认证头仅用于 CONNECT，发布 Token 与内容仅发往隧道内的源站；HTTP 转发代理的认证头仅用于代理请求。线上 base_url 必须使用 HTTPS，仓库内不保存 Token。
+配置：必须显式设置自部署服务的 `base_url`；本地 `--dry-run` 与 `discard-pending` 无需服务地址。非空 `PAGE_DROP_CONFIG_DIR` 指定配置目录，必须为绝对路径，不展开 `~` 或环境变量；指定后只读取其 `config.json` 与默认 `token`，不回退、不自动创建目录，也不改变显式 `token_file` 的原有路径语义。覆盖只影响配置目录，不改变恢复状态目录或 Token 环境变量优先级。未设置或为空字符串时，优先读取 `~/.config/page-drop/config.json`（0600，含 `base_url`、`token_file`、`timeout`）；不存在时兼容旧的 `~/.config/edge-publish/config.json`，不合并两份文件。两份配置都不存在时，按新、旧目录顺序选择已存在的 `token`，若均无则使用新目录默认值。Token 依次取非空 `PAGE_DROP_TOKEN`、旧 `EDGE_PUBLISH_TOKEN`、配置的 `token_file` 或所选配置目录下的 `token`（0600）。CLI 遵循 `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` 与 `NO_PROXY`，目前仅支持 `http://` 代理地址，其他代理协议明确报错。HTTPS 目标经 CONNECT 隧道：代理认证头仅用于 CONNECT，发布 Token 与内容仅发往隧道内的源站；HTTP 转发代理的认证头仅用于代理请求。线上 base_url 必须使用 HTTPS，仓库内不保存 Token。
 
 本地状态目录为 `~/.local/state/publish/`（0700），包括 `pending.json`、`pending.tar`、`history.jsonl` 与锁文件，文件权限均为 0600。发布、retry、丢弃操作使用同一个进程锁，禁止两个进程覆盖同一 pending；存在待确认记录时，新发布不得静默覆盖它。
 

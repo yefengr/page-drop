@@ -16,8 +16,9 @@ python3 "<当前技能目录>/scripts/publish" --help
 
 ## 配置与凭据
 
-- 配置文件优先使用 `~/.config/page-drop/config.json`；不存在时兼容旧的 `~/.config/edge-publish/config.json`。两份配置均不存在时，依次选择新、旧目录中已存在的 `token`；均无时使用新目录默认值。字段包括 `base_url`、`token_file`、`timeout`；不合并新旧配置，也不硬编码服务域名。
-- 配置和 Token 保留在用户私有位置；锁、临时归档、pending 和 history 使用 `~/.local/state/publish/`，不写入技能目录。
+- 非空 `PAGE_DROP_CONFIG_DIR` 可指定配置目录，必须是绝对路径，不展开 `~` 或环境变量；指定后只使用该目录的 `config.json` 和默认 `token`，目录或文件缺失、Token 为空、配置损坏时都不回退到新旧默认目录，也不自动创建目录。显式 `token_file` 仍按原语义使用，包括相对路径以调用者工作目录为基准。不要为绕过缺失配置或 pending 冲突擅自切换配置目录。
+- 未设置 `PAGE_DROP_CONFIG_DIR` 或其值为空字符串时，配置文件优先使用 `~/.config/page-drop/config.json`；不存在时兼容旧的 `~/.config/edge-publish/config.json`。两份配置均不存在时，依次选择新、旧目录中已存在的 `token`；均无时使用新目录默认值。字段包括 `base_url`、`token_file`、`timeout`；不合并新旧配置，也不硬编码服务域名。
+- 配置和 Token 保留在用户私有位置；覆盖配置目录不会改变锁、临时归档、pending 和 history 的位置，它们仍使用 `~/.local/state/publish/`，不写入技能目录。容器中可将配置目录指向已有的私有持久目录，但应另行确认恢复状态是否持久化；目录变量只放路径，不放 Token。
 - 凭据优先级：非空 `PAGE_DROP_TOKEN` → 非空旧 `EDGE_PUBLISH_TOKEN` → 所选配置指定的 `token_file` → 所选配置目录中的 `token`。仅检查存在性、可读性和有效配置，不输出 Token 或整份环境变量；检查脚本仅返回布尔结果或脱敏错误。
 - 配置与 Token 文件权限按项目约定为 `0600`；需要修正权限时先取得对应授权。凭据由用户在本地配置，不通过对话传递。
 - 需要联网的命令必须显式配置自部署服务的 `base_url`，没有默认服务器；线上地址必须为 HTTPS。dry-run 与 discard-pending 不需要地址。存在 pending 时，不为恢复上传擅自改 base_url；CLI 会拒绝向不同目标发送原归档。

@@ -82,6 +82,8 @@ chmod 700 "$HOME/.config/page-drop"
 chmod 600 "$HOME/.config/page-drop/config.json" "$HOME/.config/page-drop/token"
 ```
 
+如果需要使用其他私有持久目录，可设置 `PAGE_DROP_CONFIG_DIR` 为该目录的绝对路径，并在其中保存 `config.json` 和 `token`，仍保持目录 `0700`、文件 `0600`。非空值不展开 `~` 或环境变量，不回退到默认或旧目录，也不自动创建目录；未设置或为空字符串则保持原有查找行为。该变量只改变配置目录，不迁移 `~/.local/state/publish/` 中的 pending、原归档、历史和锁，容器重建前仍须单独确认恢复状态持久化。
+
 如果文件已存在，先检查用途，不要直接覆盖。也可以使用 `PAGE_DROP_TOKEN` 环境变量；凭据的完整优先级和旧配置兼容规则见 [CLI 使用参考](../skills/page-drop/references/usage.md#配置与凭据)。线上地址必须为 HTTPS；未配置地址时联网命令会失败，但本地 `--dry-run` 不需要地址或 Token。
 
 在项目目录预检并发布自己的静态目录（须含根级 `index.html`）：

@@ -24,6 +24,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from uuid import UUID
 
+CONFIG_DIR_ENV = "PAGE_DROP_CONFIG_DIR"
 CONFIG_DIR = Path.home() / ".config" / "page-drop"
 LEGACY_CONFIG_DIR = Path.home() / ".config" / "edge-publish"
 STATE_DIR = Path.home() / ".local" / "state" / "publish"
@@ -104,16 +105,27 @@ def write_private(path, data):
         raise
 
 
-def load_config():
-    config_dir = CONFIG_DIR
-    path = config_dir / "config.json"
-    if not path.exists():
-        legacy_path = LEGACY_CONFIG_DIR / "config.json"
-        if legacy_path.exists() or (
+def select_config_dir():
+    override = os.environ.get(CONFIG_DIR_ENV, "")
+    if override:
+        directory = Path(override)
+        if not directory.is_absolute():
+            fail(f"{CONFIG_DIR_ENV} 必须是绝对路径，不展开 ~ 或环境变量")
+        if directory.exists() and not directory.is_dir():
+            fail(f"{CONFIG_DIR_ENV} 必须指向目录")
+        # 显式选择配置域后，不回退到其他服务或凭据；缺失目录也不自动创建。
+        return directory
+    if not (CONFIG_DIR / "config.json").exists():
+        if (LEGACY_CONFIG_DIR / "config.json").exists() or (
             not (CONFIG_DIR / "token").exists() and (LEGACY_CONFIG_DIR / "token").exists()
         ):
-            config_dir = LEGACY_CONFIG_DIR
-            path = legacy_path
+            return LEGACY_CONFIG_DIR
+    return CONFIG_DIR
+
+
+def load_config():
+    config_dir = select_config_dir()
+    path = config_dir / "config.json"
     config = {"base_url": DEFAULT_BASE_URL, "token_file": str(config_dir / "token"), "timeout": 300}
     if path.exists():
         try:

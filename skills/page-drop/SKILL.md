@@ -25,7 +25,7 @@ description: 通过 publish CLI 将本地静态 HTML 目录发布成带有效期
 
 - 确认 Python 3 可用，以及实际加载的技能目录内 `scripts/publish` 存在且可读。缺失时说明缺口并停止，不自动联网下载、安装工具或修改 PATH；全局 `publish` 仅是可选便利入口。
 - 需要联网的命令须显式配置自部署服务的 `base_url`；没有默认服务器。dry-run 和 discard-pending 不需要地址。缺少配置时提示用户自行配置，不擅自指定服务或改动配置。
-- 需要联网的命令使用 CLI 的凭据规则：非空 `PAGE_DROP_TOKEN` 优先，其次兼容 `EDGE_PUBLISH_TOKEN`，否则使用选定配置中的 `token_file` 或其目录内的默认 `token`。优先使用 `~/.config/page-drop/config.json`；不存在时兼容 `~/.config/edge-publish/config.json`；均不存在时依次查找新、旧目录的 `token`。正式请求前只检查是否可用，不索取或输出 Token，不用文件读取或环境转储把凭据带入对话。dry-run 与 discard-pending 不要求 Token。
+- 需要联网的命令使用 CLI 的凭据规则：非空 `PAGE_DROP_TOKEN` 优先，其次兼容 `EDGE_PUBLISH_TOKEN`，否则使用选定配置中的 `token_file` 或其目录内的默认 `token`。非空 `PAGE_DROP_CONFIG_DIR` 可指定配置目录，必须是绝对路径；指定后只使用该目录的 `config.json` 和默认 `token`，不回退、不自动创建目录，也不展开 `~` 或变量。未设置或为空时，优先使用 `~/.config/page-drop/config.json`；不存在时兼容 `~/.config/edge-publish/config.json`；均不存在时依次查找新、旧目录的 `token`。配置目录覆盖不改变 `~/.local/state/publish/` 恢复状态位置，不为执行任务擅自切换该变量。正式请求前只检查是否可用，不索取或输出 Token，不用文件读取或环境转储把凭据带入对话。dry-run 与 discard-pending 不要求 Token。
 - **发布即公开**：知道 UUID 链接的人都能访问。涉及个人信息、内部资料、密钥、未公开数据或需要鉴权的材料时停止。只发布用户信任的 HTML/JavaScript；同域内容不是隔离沙箱，不托管不可信第三方页面。
 - 发布须获得用户对目录和公开访问的授权；用户未指定有效期时，使用本技能的默认 TTL，不必单独询问。用户已明确授权且范围未变时不重复确认；缺其他必要参数、出现新风险或范围改变时再询问。仅预检不等于授权上传，生成页面也不等于授权公开。
 - 用户未明确指定有效期时，预检和正式发布均默认 `3d`（3 天），并在交付时说明有效期；CLI 仍须显式传入 `--ttl 3d`。用户明确指定的有效期优先，不清楚或有冲突时先询问，不以默认值替代。传给 CLI 的格式为正整数加 `m/h/d`，范围为 10 分钟到 30 天，不传小数或组合格式；用户明确给出的时长可等值换算（如 1.5 小时用 `90m`），不能擅自取整或延长。标题和 label 可选，默认空，不把本地绝对路径当标题。
