@@ -2,7 +2,7 @@
 
 PageDrop 由自托管的 Docker 服务、本地 `publish` CLI 和可选的 AI 技能组成。本指南以单台 Linux 服务器、宿主机 Caddy 和 macOS/Linux 客户端为例；`pages.example.com` 是示例域名，使用时须替换。
 
-服务入口使用管理员自己的域名，管理 API 需要 Token；**发布页面本身不需要登录或 Token**。知道链接的人可以访问、转发或保存内容。不要发布敏感材料，也不要托管不可信的第三方 HTML/JavaScript。项目不提供公共服务器或每个发布独立设置域名的功能。
+服务入口使用管理员自己的域名，管理 API 需要 Token。发布页面默认公开，知道链接的人可以访问、转发或保存内容。发布时可加 `--access code`：服务端生成一次性展示的 8 位访问码，访问者输入后获得 1 小时会话。它不是账号体系，也不隔离同一域名下的不同发布，因此不要发布高敏感材料，也不要托管不可信的第三方 HTML/JavaScript。项目不提供公共服务器或每个发布独立设置域名的功能。
 
 ## 1. 准备
 
@@ -27,10 +27,13 @@ cd page-drop
 
 ```dotenv
 PAGE_DROP_TOKEN=<独立生成的随机 Token>
+PAGE_DROP_SESSION_KEY=<另外生成的随机密钥>
 PAGE_DROP_PUBLIC_URL=https://pages.example.com
 ```
 
-可在可信终端使用 `openssl rand -hex 32` 生成随机 Token。将实际值安全写入 `.env`，不要粘贴到公开命令、日志或 AI 对话；不要保留示例中的占位 Token。`PAGE_DROP_PUBLIC_URL` 必须替换为自己的公开 HTTPS 地址，并与后续 Caddy 域名及本地 CLI 的 `base_url` 一致。部署脚本要求 `.env` 已存在且非空，不会生成或覆盖它；已有配置时先备份，避免误覆盖。
+容器部署时，服务看到的直连对端是 Docker 网关而不是访客地址。若要让解锁限流按访客区分，在 `.env` 中把该网段加入 `PAGE_DROP_TRUSTED_PROXIES`（例如 `172.17.0.0/16`）；只在确认该网段仅承载自己的反向代理时配置。未配置时只信任回环，所有访客会共用一个限流桶。
+
+可在可信终端使用 `openssl rand -hex 32` 分别生成管理 Token 与会话密钥，两者必须不同。将实际值安全写入 `.env`，不要粘贴到公开命令、日志或 AI 对话；不要保留示例中的占位 Token。`PAGE_DROP_SESSION_KEY` 只用于受保护发布的会话签名，轮换它会让已解锁会话失效但不影响访问码；已有受保护发布而缺少该值时服务拒绝就绪。只用公开发布时可以留空。`PAGE_DROP_PUBLIC_URL` 必须替换为自己的公开 HTTPS 地址，并与后续 Caddy 域名及本地 CLI 的 `base_url` 一致。部署脚本要求 `.env` 已存在且非空，不会生成或覆盖它；已有配置时先备份，避免误覆盖。
 
 将 [`deploy/Caddyfile.page-drop`](../deploy/Caddyfile.page-drop) 的站点块加入服务器已有 Caddy 配置，并将示例域名换成自己的域名。检查配置无冲突，然后按服务器实际 Caddy 配置路径验证并重新加载，例如：
 
@@ -92,7 +95,11 @@ chmod 600 "$HOME/.config/page-drop/config.json" "$HOME/.config/page-drop/token"
 python3 cli/publish ./dist --ttl 7d --dry-run --json
 # 确认内容可以公开、TTL 合适且预检结果可接受后执行
 python3 cli/publish ./dist --ttl 7d --json
+# 需要访问码时：明文只在本次输出中出现一次，请立即保存
+python3 cli/publish ./dist --ttl 7d --access code --json
 ```
+
+访问码丢失或泄漏时，用管理 Token 重新生成：`python3 cli/publish reset-code <uuid>`。重置会让该发布此前的解锁会话失效，不会修改内容、URL 或 TTL。发布成功但本地没有保存授权码时，`publish retry` 会保留待确认记录并提示执行显式重置，不会静默换码。
 
 `./dist` 是示例，替换为实际目录。注意 stderr 中关于站点根路径资源的警告：页面位于 UUID 子路径，绝对资源路径可能加载失败。正式发布成功后，以 CLI 返回的链接和到期时间为准，并检查页面及关键资源。查询、删除与上传结果不确定时的恢复命令见 [CLI 使用参考](../skills/page-drop/references/usage.md#参数与命令)；`retry` 可能重发原归档，`discard-pending` 不会删除服务端发布。
 
@@ -136,7 +143,7 @@ curl -i http://127.0.0.1:18090/healthz
 
 更新前阅读版本变更并确认兼容性，在本地取得需要部署的代码，然后使用同一 `HOST` 和 `REMOTE` 再次执行 `deploy/deploy.sh`。脚本会重建并启动容器，可能造成短暂中断；不自动备份或回滚。先保留可恢复的旧版本和一致性备份，更新后检查健康状态及已有链接。出现故障时保留日志和数据，先确认兼容性，再决定恢复；不要直接把仅有的旧数据库或旧内容目录覆盖到运行中服务。
 
-数据目录默认是服务器的 `/srv/page-drop/data`，其中包含 SQLite 数据库、WAL 和发布文件；`.env` 另含敏感 Token。备份应由管理员在服务停止、没有写入时取得整个数据目录的一致副本，单独安全保存配置，并先在隔离环境验证恢复。停止服务会使链接不可访问；恢复前先停止目标服务、确认备份和目标路径，恢复完整一致的目录并核对 UID/GID 10001 的访问权限，再启动和验收。项目没有自动备份或恢复工具。不要并行启动两个实例，也不要用旧 `edge-publish` 数据目录直接启动 PageDrop。
+数据目录默认是服务器的 `/srv/page-drop/data`，其中包含 SQLite 数据库、WAL 和发布文件；`.env` 另含管理 Token 与会话签名密钥，两者都要单独安全保存。备份应由管理员在服务停止、没有写入时取得整个数据目录的一致副本，单独安全保存配置，并先在隔离环境验证恢复。停止服务会使链接不可访问；恢复前先停止目标服务、确认备份和目标路径，恢复完整一致的目录并核对 UID/GID 10001 的访问权限，再启动和验收。项目没有自动备份或恢复工具。不要并行启动两个实例，也不要用旧 `edge-publish` 数据目录直接启动 PageDrop。
 
 ## 7. 开发与测试
 

@@ -76,7 +76,22 @@ class Handler(BaseHTTPRequestHandler):
         if self.state.fail_post:
             self._error(503, "STORAGE_UNAVAILABLE")
             return
+        if self.path.startswith("/api/v1/publishes/") and self.path.endswith("/access"):
+            item_id = self.path.split("/")[-2]
+            existing = self.state.items.get(item_id)
+            revision = self.headers.get("X-Access-Revision")
+            if (not existing or existing.get("access_mode") != "code"
+                    or str(existing.get("access_revision")) != revision):
+                self._error(409, "CONFLICT")
+                return
+            existing["access_revision"] += 1
+            existing["access_code"] = "ZZZZZZZZ"
+            self._send(200, {"id": item_id, "access_mode": "code",
+                             "access_revision": existing["access_revision"],
+                             "access_code": "ZZZZZZZZ"})
+            return
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        access_mode = (query.get("access") or ["public"])[0]
         item = {
             "id": "11111111-1111-4111-8111-111111111111",
             "label": (query.get("label") or [""])[0],
@@ -85,7 +100,11 @@ class Handler(BaseHTTPRequestHandler):
             "created_at": int(time.time()),
             "bytes": 42,
             "file_count": 1,
+            "access_mode": access_mode,
+            "access_revision": 1 if access_mode == "code" else 0,
         }
+        if access_mode == "code":
+            item["access_code"] = "ABCDEFGH"
         self.state.items[item["id"]] = {
             "state": "committed", "available": True,
             "archive_sha256": self.headers["X-Archive-SHA256"],
@@ -424,3 +443,133 @@ def test_http_request_uses_proxy_absolute_form(cli, site, capsys, monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_publish_code_mode_saves_secret(cli, site, capsys):
+    assert cli.main([str(site), "--ttl", "1d", "--access", "code"]) == 0
+    out = capsys.readouterr().out
+    assert "access   ABCDEFGH" in out
+    assert "access=code" in cli.stub_state.posts[0]["path"]
+    history = [json.loads(line) for line in (cli.state_dir / "history.jsonl").read_text().splitlines()]
+    assert history[-1]["access_mode"] == "code"
+    assert history[-1]["access_revision"] == 1
+    assert history[-1]["access_code"] == "ABCDEFGH"
+    assert not (cli.state_dir / "pending.json").exists()
+
+
+def test_publish_default_mode_stays_public(cli, site):
+    assert cli.main([str(site), "--ttl", "1d"]) == 0
+    assert "access=public" in cli.stub_state.posts[0]["path"]
+    history = [json.loads(line) for line in (cli.state_dir / "history.jsonl").read_text().splitlines()]
+    assert history[-1]["access_mode"] == "public"
+    assert history[-1]["access_code"] is None
+
+
+def test_publish_rejects_unknown_access_mode(cli, site):
+    assert cli.main([str(site), "--ttl", "1d", "--access", "secret"]) == 2
+
+
+def test_retry_recovers_code_from_pending(cli, site, capsys, monkeypatch):
+    original = cli.finalize
+
+    def failing_finalize(result, record):
+        raise OSError("local finalize interrupted")
+
+    monkeypatch.setattr(cli, "finalize", failing_finalize)
+    assert cli.main([str(site), "--ttl", "1d", "--access", "code"]) == 2
+    pending = json.loads((cli.state_dir / "pending.json").read_text())
+    assert pending["access_code"] == "ABCDEFGH"
+    assert pending["access_revision"] == 1
+
+    monkeypatch.setattr(cli, "finalize", original)
+    cli.stub_state.posts.clear()
+    assert cli.main(["retry"]) == 0
+    assert cli.stub_state.posts == []
+    history = [json.loads(line) for line in (cli.state_dir / "history.jsonl").read_text().splitlines()]
+    assert history[-1]["access_code"] == "ABCDEFGH"
+    assert not (cli.state_dir / "pending.json").exists()
+
+
+def test_retry_without_secret_requires_explicit_reset(cli, site, capsys):
+    cli.stub_state.fail_post = True
+    assert cli.main([str(site), "--ttl", "1d", "--access", "code"]) == 2
+    pending = json.loads((cli.state_dir / "pending.json").read_text())
+    cli.stub_state.fail_post = False
+    cli.stub_state.uploads[pending["key"]] = {
+        "id": "11111111-1111-4111-8111-111111111111", "state": "committed",
+        "available": True, "archive_sha256": pending["archive_sha256"],
+        "ttl_seconds": 86400, "title": "", "label": "",
+        "access_mode": "code", "access_revision": 1,
+        "url": "https://example.test/11111111-1111-4111-8111-111111111111/",
+        "expires_at": int(time.time()) + 3600, "created_at": int(time.time()),
+        "bytes": 42, "file_count": 1,
+    }
+
+    assert cli.main(["retry"]) == 2
+    err = capsys.readouterr().err
+    assert "授权码" in err and "reset-code" in err
+    assert (cli.state_dir / "pending.json").exists()
+
+
+def test_reset_code_replaces_secret(cli, site, capsys):
+    assert cli.main([str(site), "--ttl", "1d", "--access", "code"]) == 0
+    assert cli.main(["reset-code", "11111111-1111-4111-8111-111111111111"]) == 0
+    out = capsys.readouterr().out
+    assert "ZZZZZZZZ" in out
+    history = [json.loads(line) for line in (cli.state_dir / "history.jsonl").read_text().splitlines()]
+    resets = [record for record in history if record.get("operation") == "reset-code"]
+    assert len(resets) == 1
+    assert resets[0]["access_revision"] == 2
+    assert resets[0]["access_code"] == "ZZZZZZZZ"
+    assert not (cli.state_dir / "pending.json").exists()
+
+
+def test_reset_code_rejects_public_item(cli, site, capsys):
+    assert cli.main([str(site), "--ttl", "1d"]) == 0
+    assert cli.main(["reset-code", "11111111-1111-4111-8111-111111111111"]) == 2
+    assert "受保护" in capsys.readouterr().err
+
+
+def test_reset_code_resumes_matching_pending_publish(cli, site, capsys):
+    cli.stub_state.fail_post = True
+    assert cli.main([str(site), "--ttl", "1d", "--access", "code"]) == 2
+    pending = json.loads((cli.state_dir / "pending.json").read_text())
+    cli.stub_state.fail_post = False
+    item_id = "11111111-1111-4111-8111-111111111111"
+    record = {
+        "id": item_id, "state": "committed", "available": True,
+        "archive_sha256": pending["archive_sha256"], "ttl_seconds": 86400,
+        "title": "", "label": "", "access_mode": "code", "access_revision": 1,
+        "url": f"https://example.test/{item_id}/",
+        "expires_at": int(time.time()) + 3600, "created_at": int(time.time()),
+        "bytes": 42, "file_count": 1,
+    }
+    cli.stub_state.items[item_id] = record
+    cli.stub_state.uploads[pending["key"]] = record
+
+    assert cli.main(["reset-code", item_id]) == 0
+    assert "ZZZZZZZZ" in capsys.readouterr().out
+    history = [json.loads(line) for line in (cli.state_dir / "history.jsonl").read_text().splitlines()]
+    assert history[-1]["access_code"] == "ZZZZZZZZ"
+    assert history[-1]["access_revision"] == 2
+    assert not (cli.state_dir / "pending.json").exists()
+
+
+def test_reset_code_rejects_unrelated_pending(cli, site, capsys):
+    cli.stub_state.fail_post = True
+    assert cli.main([str(site), "--ttl", "1d", "--access", "code"]) == 2
+    cli.stub_state.fail_post = False
+    other = "22222222-2222-4222-8222-222222222222"
+    cli.stub_state.items[other] = {
+        "id": other, "state": "committed", "available": True,
+        "access_mode": "code", "access_revision": 1,
+    }
+    # 原 pending 指向另一个发布：必须拒绝，不能覆盖恢复记录。
+    pending = json.loads((cli.state_dir / "pending.json").read_text())
+    cli.stub_state.uploads[pending["key"]] = {
+        "id": "33333333-3333-4333-8333-333333333333", "state": "committed",
+        "available": True, "access_mode": "code", "access_revision": 1,
+    }
+    assert cli.main(["reset-code", other]) == 2
+    assert "其他" in capsys.readouterr().err
+    assert (cli.state_dir / "pending.json").exists()

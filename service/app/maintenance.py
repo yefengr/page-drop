@@ -85,7 +85,7 @@ async def maintain(service):
         item_id = row["id"]
         if item_id in service.active:
             continue
-        async with service.locks[item_id]:
+        async with service.locks.hold(item_id):
             row = await service.current(item_id)
             if row is None:
                 continue
@@ -111,6 +111,7 @@ async def maintain(service):
         await service.cleanup(item_id)
     await reconcile_orphans(service)
     await service.io(service.repo.purge, service.clock.now() - C.RECORD_RETENTION)
+    service.limiter.purge()
 
 
 async def loop(service):

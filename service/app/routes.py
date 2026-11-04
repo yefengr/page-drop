@@ -3,17 +3,18 @@ import hmac
 import logging
 import re
 import unicodedata
-from urllib.parse import unquote_to_bytes
+from urllib.parse import parse_qs, unquote_to_bytes
 import uuid
 
 from starlette.requests import ClientDisconnect
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
+from . import access
 from . import config as C
 from .archive import InvalidArtifact, validate_path
 from .config import ServiceError
-from .pages import LANDING, NOT_FOUND
+from .pages import LANDING, NOT_FOUND, unlock as unlock_page
 from .service import worker
 
 LOG = logging.getLogger("page_drop")
@@ -109,13 +110,16 @@ def canonical_uuid(value):
 
 
 def upload_parameters(request):
-    args = query(request, {"ttl", "title", "label"})
+    args = query(request, {"ttl", "title", "label", "access"})
     match = re.fullmatch(r"([0-9]+)([mhd])", args.get("ttl", ""))
     if match is None or len(match[1]) > 10:
         raise ServiceError("INVALID_ARGUMENT", "Invalid TTL")
     ttl = int(match[1]) * {"m": 60, "h": 3600, "d": 86400}[match[2]]
     title = args.get("title", "")
     label = args.get("label", "").strip()
+    access_mode = args.get("access", "public")
+    if access_mode not in ("public", "code"):
+        raise ServiceError("INVALID_ARGUMENT", "Invalid access mode")
     if not 600 <= ttl <= 30 * 86400 or len(title) > 200 or any(unicodedata.category(c).startswith("C") for c in title):
         raise ServiceError("INVALID_ARGUMENT", "Invalid TTL or title")
     if len(label) > 64 or any(unicodedata.category(c).startswith("C") for c in label):
@@ -135,16 +139,22 @@ def upload_parameters(request):
         length = int(raw_length)
         if length > C.MAX_ARCHIVE:
             raise ServiceError("PAYLOAD_TOO_LARGE", "Archive exceeds limit")
-    return key, ttl, title, digest, length, label
+    return key, ttl, title, digest, length, label, access_mode
 
 
 async def publish(request):
     service = authorize(request)
     await service.check_storage()
-    row, fresh = await service.publish(request, *upload_parameters(request))
+    row, fresh, code = await service.publish(request, *upload_parameters(request))
     result = dict(row, url=f"{public_base(service, request)}/{row['id']}/")
     fields = ("id", "url", "expires_at", "created_at", "bytes", "file_count")
-    return JSONResponse({key: result[key] for key in fields}, status_code=201 if fresh else 200)
+    payload = {key: result[key] for key in fields}
+    payload["access_mode"] = row["access_mode"]
+    payload["access_revision"] = row["access_revision"]
+    if fresh and code:
+        # 明文只在本次新提交中出现一次；幂等复用不返回。
+        payload["access_code"] = code
+    return JSONResponse(payload, status_code=201 if fresh else 200)
 
 
 async def listing(request):
@@ -155,7 +165,7 @@ async def listing(request):
         raise ServiceError("INVALID_ARGUMENT", "Invalid all parameter")
     result = []
     for row in await service.io(service.repo.list):
-        async with service.locks[row["id"]]:
+        async with service.locks.hold(row["id"]):
             current = await service.current(row["id"])
             if current is not None:
                 view = service.view(current, public_base(service, request))
@@ -174,7 +184,7 @@ async def status(request):
         if row is None:
             raise ServiceError("NOT_FOUND", "Upload not found")
         value = row["id"]
-    async with service.locks[value]:
+    async with service.locks.hold(value):
         row = await service.current(value)
         if row is None:
             raise ServiceError("NOT_FOUND", "Publish not found")
@@ -198,6 +208,7 @@ async def health(request):
 
 
 def content_path(request):
+    """解析内容路径；返回 (item_id, path, 是否为发布根) 或 None。"""
     # Split the wire path first: an encoded slash is not a path separator.
     raw = request.scope.get("raw_path", request.url.path.encode("utf-8")).split(b"?", 1)[0]
     parts = raw.split(b"/")
@@ -209,12 +220,55 @@ def content_path(request):
             return None
         item_id = str(uuid.UUID(decoded[0]))
         if len(decoded) == 1:
-            return item_id, None
+            return item_id, None, False
         if decoded[1:] == [""]:
-            return item_id, "index.html"
-        return item_id, validate_path("/".join(decoded[1:]))
+            return item_id, "index.html", True
+        return item_id, validate_path("/".join(decoded[1:])), False
     except (UnicodeError, ValueError, InvalidArtifact):
         return None
+
+
+def client_address(request):
+    """只在直连对端是回环或已声明代理时采用其覆盖的 X-Forwarded-For。"""
+    service = request.app.state.publisher
+    client = request.scope.get("client")
+    host = client[0] if client else ""
+    forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    if forwarded and service.trusts_proxy(host):
+        return forwarded
+    return host or "unknown"
+
+
+def session_token(request, item_id):
+    return request.cookies.get(access.session_cookie_name(item_id))
+
+
+async def read_unlock_form(request):
+    """流式读取小型表单，避免为公开端点整包缓冲。"""
+    if not request.headers.get("content-type", "").lower().startswith(
+            "application/x-www-form-urlencoded"):
+        raise ServiceError("UNSUPPORTED_MEDIA_TYPE", "A form body is required")
+    chunks, total = [], 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > C.ACCESS_BODY_LIMIT:
+            raise ServiceError("INVALID_ARGUMENT", "Unlock form too large")
+        chunks.append(chunk)
+    try:
+        values = parse_qs(b"".join(chunks).decode("utf-8", "strict"), keep_blank_values=True)
+    except UnicodeError:
+        raise ServiceError("INVALID_ARGUMENT", "Invalid form encoding") from None
+    codes = values.get("code", [])
+    if set(values) - {"code"} or len(codes) > 1:
+        raise ServiceError("INVALID_ARGUMENT", "Invalid form fields")
+    return codes[0] if codes else ""
+
+
+def unlock_response(error="", status_code=200):
+    return HTMLResponse(unlock_page(error), status_code=status_code, headers={
+        "Content-Security-Policy":
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+    })
 
 
 def byte_range(value, size):
@@ -293,18 +347,75 @@ async def content(request):
     parsed = content_path(request)
     if parsed is None:
         return not_found(request)
-    item_id, path = parsed
-    admitted = await service.admit(item_id, path)
-    if admitted is None:
+    item_id, path, is_root = parsed
+    status, value = await service.admit(item_id, path, session_token(request, item_id))
+    if status == "missing":
         return not_found(request)
-    if path is None:
+    if status == "locked":
+        # 根路径与 HTML 文档请求显示解锁表单；其他资源不泄露内容。
+        if is_root or wants_html(request):
+            return unlock_response()
+        return Response(status_code=403)
+    if status == "redirect":
         return Response(status_code=308, headers={"Location": f"/{item_id}/"})
-    handle, entry = admitted
+    handle, entry = value
     interval = byte_range(request.headers.get("range"), entry["size"])
     if interval is None:
         await service.release(item_id, handle)
         return Response(status_code=416, headers={"Content-Range": f"bytes */{entry['size']}", "Accept-Ranges": "bytes"})
     return LeaseResponse(service, item_id, handle, entry, interval, request.method == "HEAD")
+
+
+async def unlock(request):
+    """校验授权码并下发 1 小时会话；未知与不可用统一返回 404。"""
+    service = request.app.state.publisher
+    await service.check_storage()
+    try:
+        item_id = str(uuid.UUID(request.path_params["item_id"]))
+    except (ValueError, AttributeError):
+        return not_found(request)
+    client = client_address(request)
+    wait = await service.io(service.limiter.blocked, item_id, client)
+    if wait:
+        return Response(status_code=429, headers={"Retry-After": str(wait)})
+    try:
+        code = (await read_unlock_form(request)).strip().upper()
+    except ServiceError as exc:
+        return error_response(exc)
+    if not await service.io(service.limiter.submit, item_id, client):
+        return Response(status_code=429, headers={"Retry-After": str(C.AUTH_WINDOW)})
+    status, value = await service.unlock(item_id, code)
+    if status == "missing":
+        return not_found(request)
+    if status == "denied":
+        # 先返回本次失败结果，达到阈值后由下一次请求进入限流分支。
+        recorded = await service.io(service.limiter.failure, item_id, client)
+        if not recorded:
+            return Response(status_code=429, headers={"Retry-After": str(C.AUTH_WINDOW)})
+        return unlock_response("访问码不正确", 401)
+    row, token = value
+    await service.io(service.limiter.clear, item_id, client)
+    max_age = max(0, min(C.ACCESS_SESSION_SECONDS, row["expires_at"] - service.clock.now()))
+    response = Response(status_code=303, headers={"Location": f"/{item_id}/"})
+    response.set_cookie(
+        access.session_cookie_name(item_id), token, max_age=max_age,
+        path=f"/{item_id}/", secure=True, httponly=True, samesite="lax",
+    )
+    return response
+
+
+async def reset_access(request):
+    """管理接口：按当前认证版本条件重新生成授权码。"""
+    service = authorize(request)
+    await service.check_storage()
+    query(request, set())
+    item_id = canonical_uuid(request.path_params["value"])
+    raw = request.headers.get("x-access-revision", "")
+    if re.fullmatch(r"[1-9][0-9]{0,8}", raw) is None:
+        raise ServiceError("INVALID_ARGUMENT", "Invalid access revision")
+    row, code = await service.reset_code(item_id, int(raw))
+    return JSONResponse({"id": row["id"], "access_mode": row["access_mode"],
+                         "access_revision": row["access_revision"], "access_code": code})
 
 
 ROUTES = [
@@ -314,6 +425,8 @@ ROUTES = [
     Route("/api/v1/publishes", listing, methods=["GET"]),
     Route("/api/v1/publishes/{value}", status, methods=["GET"]),
     Route("/api/v1/publishes/{value}", delete, methods=["DELETE"]),
+    Route("/api/v1/publishes/{value}/access", reset_access, methods=["POST"]),
     Route("/api/v1/uploads/{value}", status, methods=["GET"]),
+    Route("/{item_id}/_unlock", unlock, methods=["POST"]),
     Route("/{path:path}", content, methods=["GET", "HEAD"]),
 ]

@@ -1,5 +1,5 @@
 import asyncio
-from collections import defaultdict
+import ipaddress
 from dataclasses import dataclass, field
 import hashlib
 import logging
@@ -11,6 +11,7 @@ import stat
 import threading
 import uuid
 
+from . import access
 from . import config as C
 from .archive import extract, logical_size, sync_directory
 from .clock import Clock
@@ -19,6 +20,7 @@ from .db import Database
 from .ledger import Ledger
 from .leases import Leases
 from .lock import InstanceLock
+from .locks import LockRegistry
 from .repository import Repository
 
 LOG = logging.getLogger("page_drop")
@@ -53,6 +55,15 @@ class Upload:
     cancel: threading.Event = field(default_factory=threading.Event)
 
 
+# 对外视图字段白名单：内部认证材料与账本字段不得跟随行对象泄露。
+VIEW_FIELDS = (
+    "id", "state", "ttl_seconds", "title", "label", "archive_sha256", "archive_bytes",
+    "bytes", "file_count", "dir_count", "created_at", "expires_at", "committed_at",
+    "deleted_at", "delete_reason", "error_code", "error_message",
+    "access_mode", "access_revision",
+)
+
+
 class ArchiveWriter:
     def __init__(self, path):
         self.file = os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb")
@@ -82,7 +93,14 @@ class Publisher:
         self.instance_lock = InstanceLock(self.root / "service.lock")
         self.ledger, self.leases = Ledger(), Leases()
         self.gate = asyncio.Lock()
-        self.locks = defaultdict(asyncio.Lock)
+        self.locks = LockRegistry(C.MAX_LOCK_ENTRIES)
+        self.limiter = access.AuthLimiter(self.clock)
+        self.derive_slots = asyncio.Semaphore(C.ACCESS_DERIVE_CONCURRENCY)
+        try:
+            self.session_key = bytes.fromhex(settings.session_key) if settings.session_key else b""
+        except ValueError:
+            self.session_key = b""
+        self.trusted_proxies = C.parse_networks(settings.trusted_proxies)
         self.active = {}
         self.deadlines = {}
         self.response_tasks = set()
@@ -143,6 +161,9 @@ class Publisher:
                     "for page-drop.db; database initialization and recovery are disabled")
             await self.io(self.check_initial_content)
             await self.io(self.db.initialize)
+            if not self.session_key and await self.io(self.repo.has_protected):
+                raise ServiceError("STORAGE_UNAVAILABLE",
+                    "PAGE_DROP_SESSION_KEY is required while protected publishes exist")
             await recover(self)
             self.ready = True
         except ServiceError:
@@ -199,6 +220,16 @@ class Publisher:
         await self.io(self.db.check)
         await self.io(self.check_directories)
 
+    def trusts_proxy(self, host):
+        """只有回环或显式声明的代理地址才采信其覆盖的客户端地址。"""
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        if address.is_loopback:
+            return True
+        return any(address in network for network in self.trusted_proxies)
+
     def check_directories(self):
         for area in ("tmp", "items", "trash"):
             path = self.root / area
@@ -220,7 +251,7 @@ class Publisher:
         return self.clock.now() < row["expires_at"] and self.clock.monotonic() < deadline
 
     def view(self, row, base_url):
-        result = dict(row)
+        result = {name: row.get(name) for name in VIEW_FIELDS}
         result["available"] = self.is_available(row)
         if result["available"]:
             result["url"] = f"{base_url.rstrip('/')}/{row['id']}/"
@@ -233,34 +264,47 @@ class Publisher:
             row = await self.io(self.repo.get, item_id)
         return row
 
-    async def begin(self, key, ttl, title, digest, label=""):
+    async def begin(self, key, ttl, title, digest, label="", access_mode="public"):
         item_id = None
         try:
             async with self.gate:
                 old = await self.io(self.repo.by_key, key)
                 if old is not None:
-                    async with self.locks[old["id"]]:
+                    async with self.locks.hold(old["id"]):
                         old = await self.current(old["id"])
-                        if ((old["ttl_seconds"], old["title"], old["label"], old["archive_sha256"])
-                                != (ttl, title, label, digest)
+                        if ((old["ttl_seconds"], old["title"], old["label"],
+                             old["archive_sha256"], old["access_mode"])
+                                != (ttl, title, label, digest, access_mode)
                                 or not self.is_available(old)):
                             raise ServiceError("CONFLICT", "Upload key is active, terminal, or has different parameters")
-                        return old, False
+                        return old, False, None
                 if self.active:
                     raise ServiceError("BUSY", "Another upload is active")
+                if access_mode == "code" and not self.session_key:
+                    raise ServiceError("STORAGE_UNAVAILABLE", "Session key is not configured")
                 await self.io(self.disk_check, True)
                 candidate = str(uuid.uuid4())
                 self.ledger.reserve(candidate)
                 item_id = candidate
-                await self.io(self.repo.insert, item_id, key, self.clock.now(), ttl, title, digest, label)
+                # 授权码只在本次请求内存中保留；数据库保存可校验的派生记录。
+                code = access.generate_code() if access_mode == "code" else None
+                if code:
+                    async with self.derive_slots:
+                        record = await self.io(access.hash_code, code)
+                else:
+                    record = None
+                revision = 1 if code else 0
+                await self.io(self.repo.insert, item_id, key, self.clock.now(), ttl, title, digest,
+                              label, access_mode, record, revision)
                 self.active[item_id] = Upload(asyncio.current_task())
                 # No await between registration and returning ownership to publish().
-                return {"id": item_id, "ttl_seconds": ttl}, True
+                return ({"id": item_id, "ttl_seconds": ttl, "access_mode": access_mode,
+                         "access_revision": revision}, True, code)
         except BaseException:
             if item_id is not None and not self.database_failed:
                 settled = False
                 try:
-                    async with self.locks[item_id]:
+                    async with self.locks.hold(item_id):
                         row = await self.io(self.repo.get, item_id)
                         if row is not None:
                             await self.mark_deleting(row, "aborted")
@@ -277,10 +321,10 @@ class Publisher:
                         self.ledger.release(item_id)
             raise
 
-    async def publish(self, request, key, ttl, title, digest, length, label=""):
-        row, fresh = await self.begin(key, ttl, title, digest, label)
+    async def publish(self, request, key, ttl, title, digest, length, label="", access_mode="public"):
+        row, fresh, code = await self.begin(key, ttl, title, digest, label, access_mode)
         if not fresh:
-            return row, False
+            return row, False, None
         item_id = row["id"]
         upload = self.active[item_id]
         error = None
@@ -301,7 +345,7 @@ class Publisher:
             # This task owns all disk workers and waits for them before this point.
             if error is not None and not self.database_failed:
                 try:
-                    async with self.locks[item_id]:
+                    async with self.locks.hold(item_id):
                         current = await self.io(self.repo.get, item_id)
                         if current and current["state"] == "committed":
                             self.ledger.settle(item_id, current["accounted_bytes"])
@@ -314,7 +358,7 @@ class Publisher:
             self.active.pop(item_id, None)
             if not self.database_failed:
                 await self.cleanup(item_id)
-        return committed, True
+        return committed, True, code
 
     async def receive_and_commit(self, request, row, upload, digest, length):
         item_id = row["id"]
@@ -344,7 +388,7 @@ class Publisher:
             raise ServiceError("INVALID_ARTIFACT", "Archive length or SHA-256 mismatch")
         manifest = await self.io(extract, root / ".archive.tar", root,
                                  upload.cancel, self.disk_check, cancel=upload.cancel)
-        async with self.locks[item_id]:
+        async with self.locks.hold(item_id):
             current = await self.io(self.repo.get, item_id)
             if upload.cancel.is_set() or current["state"] != "uploading":
                 raise ServiceError("CONFLICT", "Upload cancelled")
@@ -377,7 +421,7 @@ class Publisher:
             self.active[item_id].cancel.set()
 
     async def delete(self, item_id):
-        async with self.locks[item_id]:
+        async with self.locks.hold(item_id):
             row = await self.io(self.repo.get, item_id)
             if row is None:
                 raise ServiceError("NOT_FOUND", "Publish not found")
@@ -408,7 +452,7 @@ class Publisher:
     async def cleanup(self, item_id):
         if self.database_failed or item_id in self.active:
             return
-        async with self.locks[item_id]:
+        async with self.locks.hold(item_id):
             try:
                 row = await self.io(self.repo.get, item_id)
                 if row is None or row["state"] != "deleting":
@@ -446,16 +490,29 @@ class Publisher:
             os.close(fd)
             raise
 
-    async def admit(self, item_id, path=None):
-        async with self.locks[item_id]:
+    async def admit(self, item_id, path=None, token=None):
+        """内容准入：区分不可用、需要解锁、跳转和正常响应。"""
+        # 先确认元数据存在，避免未知 UUID 登记常驻锁；锁内仍要重新读取。
+        if await self.io(self.repo.get, item_id) is None:
+            return "missing", None
+        async with self.locks.hold(item_id):
             row = await self.current(item_id)
             if row is None or not self.is_available(row):
-                return None
+                return "missing", None
             if path is None:
-                return row
+                # 无尾斜杠只确认可用性；跳转本身不提供内容或会话。
+                return "redirect", row
+            mode = row["access_mode"]
+            if mode == "code":
+                revision = access.verify_session(self.session_key, item_id, token, self.clock.now())
+                if revision is None or revision != row["access_revision"]:
+                    return "locked", row
+            elif mode != "public":
+                # 未知模式按损坏数据处理，不能回退成公开访问。
+                return "missing", None
             entry = await self.io(self.repo.file, item_id, path)
             if entry is None:
-                return None
+                return "missing", None
             if len(self.leases.handles) >= C.MAX_DOWNLOADS:
                 raise ServiceError("BUSY", "Download admission is full")
             handle = await self.io(self.open_manifest_file, item_id, entry, dispose=lambda h: h.close())
@@ -464,7 +521,50 @@ class Publisher:
             except BaseException:
                 await self.io(handle.close)
                 raise
-            return handle, entry
+            return "ok", (handle, entry)
+
+    async def unlock(self, item_id, code):
+        """口令校验；返回 missing / denied / ok 三态。"""
+        row = await self.io(self.repo.get, item_id)
+        if row is None or row["access_mode"] != "code" or not self.is_available(row):
+            return "missing", None
+        # 记录本次校验依据的版本：重置后旧口令不能换到新版本会话。
+        checked_revision = row["access_revision"]
+        valid = False
+        if code and row["access_hash"]:
+            async with self.derive_slots:
+                valid = await self.io(access.verify_code, row["access_hash"], code)
+        if not valid:
+            return "denied", row
+        async with self.locks.hold(item_id):
+            row = await self.current(item_id)
+            if row is None or row["access_mode"] != "code" or not self.is_available(row):
+                return "missing", None
+            if row["access_revision"] != checked_revision:
+                return "denied", row
+            now = self.clock.now()
+            expires = min(now + C.ACCESS_SESSION_SECONDS, row["expires_at"])
+            token = access.session_token(self.session_key, item_id, row["access_revision"], now, expires)
+            return "ok", (row, token)
+
+    async def reset_code(self, item_id, expected_revision):
+        """按当前版本条件换码；同版本最多生效一次。"""
+        if not self.session_key:
+            raise ServiceError("STORAGE_UNAVAILABLE", "Session key is not configured")
+        code = access.generate_code()
+        async with self.derive_slots:
+            record = await self.io(access.hash_code, code)
+        async with self.locks.hold(item_id):
+            row = await self.current(item_id)
+            if row is None or not self.is_available(row):
+                raise ServiceError("NOT_FOUND", "Publish not found")
+            if row["access_mode"] != "code":
+                raise ServiceError("CONFLICT", "Publish is not protected")
+            if row["access_revision"] != expected_revision:
+                raise ServiceError("CONFLICT", "Access revision changed")
+            if not await self.io(self.repo.replace_access, item_id, expected_revision, record):
+                raise ServiceError("CONFLICT", "Access revision changed")
+            return await self.io(self.repo.get, item_id), code
 
     async def release(self, item_id, handle):
         try:

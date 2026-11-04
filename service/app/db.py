@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS items (
  archive_sha256 TEXT NOT NULL, archive_bytes INTEGER,
  bytes INTEGER, file_count INTEGER, dir_count INTEGER,
  accounted_bytes INTEGER NOT NULL DEFAULT 0,
+ access_mode TEXT NOT NULL DEFAULT 'public', access_hash TEXT,
+ access_revision INTEGER NOT NULL DEFAULT 0,
  state TEXT NOT NULL CHECK(state IN ('uploading','committed','deleting','deleted')),
  committed_at INTEGER, deleted_at INTEGER, delete_reason TEXT,
  error_code TEXT, error_message TEXT
@@ -57,7 +59,7 @@ class Database:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
             version = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-            if version is not None and version[0] not in ("1", "2"):
+            if version is not None and version[0] not in ("1", "2", "3"):
                 raise sqlite3.DatabaseError("unsupported database schema")
             columns = {row[1] for row in conn.execute("PRAGMA table_info(items)")}
             expected = {"id", "idempotency_key", "state", "accounted_bytes", "archive_bytes"}
@@ -66,11 +68,18 @@ class Database:
             if "label" not in columns:
                 # v1 → v2：仅新增带默认值的列，不改动既有行。
                 conn.execute("ALTER TABLE items ADD COLUMN label TEXT NOT NULL DEFAULT ''")
-            conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', '2')")
+            if "access_mode" not in columns:
+                # v2 → v3：存量发布一律保持公开，不自动给旧链接加码。
+                conn.execute("ALTER TABLE items ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'public'")
+            if "access_hash" not in columns:
+                conn.execute("ALTER TABLE items ADD COLUMN access_hash TEXT")
+            if "access_revision" not in columns:
+                conn.execute("ALTER TABLE items ADD COLUMN access_revision INTEGER NOT NULL DEFAULT 0")
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', '3')")
 
     def check(self):
         if not self.path.is_file():
             raise OSError("database missing")
         with self.connect() as conn:
-            conn.execute("SELECT id, state, accounted_bytes FROM items LIMIT 1").fetchall()
+            conn.execute("SELECT id, state, accounted_bytes, access_mode FROM items LIMIT 1").fetchall()
             conn.execute("SELECT path, size, mime FROM files LIMIT 1").fetchall()

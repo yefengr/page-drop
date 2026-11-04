@@ -19,7 +19,7 @@
 - 不做动态应用托管、常驻业务 API 或 SPA history 路由回落。
 - 不在原 URL 上更新内容；修改产物后重新发布，得到新的 UUID。
 - v1 不做断点续传、gzip 上传或多实例扩容；失败后重新上传完整的未压缩 tar。
-- 不把 UUID 当成身份认证：知道地址的人可以访问，也可以转发、保存或截图。需要鉴权的材料不适用。
+- UUID 仍不是身份凭据：`access=code` 只提供单因子访问码准入，不隔离同域其他发布，也不阻止已获准的访问者保存、转发或截图。高敏感材料仍不适用。
 - 只接收发布者信任的 HTML/JavaScript；同域内容不是相互隔离的沙箱，不托管不可信第三方页面。
 - 不承诺撤回访问者已经获得的内容，也不强制中断到期前已获准的响应；TTL 和删除控制的是后续请求准入。
 - 不承诺实际磁盘占用严格等于内容配额；文件系统分配、目录、SQLite/WAL 和 Docker 日志另行占用空间。
@@ -100,6 +100,9 @@ SQLite 表 `items`：
 | `created_at` / `expires_at` | 提交时写入；`expires_at = created_at + ttl_seconds`，未提交时为空 |
 | `ttl_seconds` / `title` | 归一化 TTL；标题默认空串、≤ 200 字符，不接受控制字符 |
 | `label` | 客户端自报的发布者标签，默认空串、≤ 64 字符；仅用于追溯，不参与鉴权 |
+| `access_mode` | `public` 或 `code`，默认 `public`；提交后不可切换 |
+| `access_hash` | `code` 模式下的带盐校验记录（scrypt 参数、盐、派生值）；`public` 为空 |
+| `access_revision` | `public` 为 0；`code` 从 1 起，成功重置时递增，用于让旧会话失效 |
 | `archive_sha256` | 客户端声明的归档 SHA-256；提交前须与实际接收结果一致 |
 | `archive_bytes` | 接收并验证完成后持久化的实际归档字节数，作为恢复检查点；此前为空 |
 | `bytes` / `file_count` / `dir_count` | 提交时的普通文件逻辑字节数、文件数、目录数；未提交时可为空 |
@@ -164,11 +167,13 @@ API 响应为 JSON，错误体固定为 `{"error":{"code":"...","message":"..."}
 | `GET /api/v1/publishes/<uuid>` | Token | 状态、可访问性、时间、大小与错误原因；不返回文件内容 |
 | `GET /api/v1/uploads/<idempotency_key>` | Token | 按上传请求查询结果，供 retry 先确认状态；无记录返回 404 |
 | `DELETE /api/v1/publishes/<uuid>` | Token | 已知项与重复删除返回 204；访问准入已关闭，不代表物理清理已完成；未知 UUID 返回 404 |
+| `POST /api/v1/publishes/<uuid>/access` | Token | 受保护发布重新生成访问码；要求 `X-Access-Revision` 匹配当前版本 |
 | `GET /healthz` | 无 | 就绪与必要存储检查，只有 200/503，不含业务数据 |
 | `GET/HEAD /` | 无 | 存储就绪时 200 返回不含任何条目信息的默认页；未就绪或不可用时 503 |
 | `GET/HEAD /<uuid>` | 无 | 仅可访问项 308 跳转到 `/<uuid>/`；其余 404 |
-| `GET/HEAD /<uuid>/` | 无 | 查清单返回根 `index.html`；不可访问或文件不存在则 404 |
-| `GET/HEAD /<uuid>/<path>` | 无 | 精确查清单返回文件；支持 Range；不可访问或未命中则 404 |
+| `GET/HEAD /<uuid>/` | 无 | `code` 模式未解锁时返回 200 解锁页；否则查清单返回根 `index.html`；不可访问或文件不存在则 404 |
+| `GET/HEAD /<uuid>/<path>` | 无 | 未解锁时 HTML 文档请求返回解锁页、其他请求 403；已解锁精确查清单返回文件并支持 Range |
+| `POST /<uuid>/_unlock` | 无 | 校验授权码；成功 303 跳转并下发 1 小时会话 Cookie；未知或不可用返回 404 |
 
 状态查询统一包含 `id`、`state`、`available`、`ttl_seconds`、`title`、`archive_sha256`、`archive_bytes`、提交统计与时间、错误原因；未产生的值为 null。`available` 由服务端按状态和 TTL 计算，只有为 true 时才提供 `url`，CLI 不用本机时钟判断链接是否仍有效。上传查询复用同一状态结构，不返回归档或文件内容。
 
@@ -184,17 +189,33 @@ API 响应为 JSON，错误体固定为 `{"error":{"code":"...","message":"..."}
 - 有效旧 key 的查询或结果复用先于新上传名额检查；新 key 在已有上传时返回 503 `BUSY`，不排队。
 - `Content-Length` 仅用于归档传输大小预检，缺失时允许分块上传；服务仍须统计实际接收字节。内容字节另按普通文件统计，不从请求长度推算。
 
+### 访问码保护
+
+`POST /api/v1/publishes` 接受 `access=public|code`，默认 `public`。授权码只能由服务端生成，不接受客户端传入的明文；`code` 模式未配置 `PAGE_DROP_SESSION_KEY` 时拒绝发布。
+
+- 授权码为 8 位、字符集 `ABCDEFGHJKMNPQRSTUVWXYZ23456789`。数据库只保存 scrypt 校验记录，不保存明文。
+- 明文只在本次新提交的 `201` 响应中返回一次，字段为 `access_code`；幂等复用（`200`）和状态查询不返回。
+- 幂等键绑定 TTL、标题、标签、归档摘要与 `access_mode`；不绑定随机授权码、校验记录或版本。同 key 换模式返回 `409`。
+- 发布视图新增 `access_mode`、`access_revision`；白名单输出，不返回 `access_hash`、盐或密钥。
+- 解锁成功下发 `pd_<uuid hex>` Cookie：`Secure; HttpOnly; SameSite=Lax`，`Path=/<uuid>/`，`Max-Age=min(3600, 剩余 TTL)`，不续期。签名绑定发布 UUID、`access_revision`、签发与到期时间，密钥为独立的 `PAGE_DROP_SESSION_KEY`。
+- 内容准入、会话签发与重置共享同一发布的当前版本条件。重置使用 `X-Access-Revision` 应用级版本条件；版本不再匹配返回 `409`，缺失或非法返回 `400`，`public` 项返回 `409`。
+- 重置成功后旧口令与旧会话都不再获得新准入；已获准的在途响应按读租约完成。
+- 解锁接口按 `(发布, 客户端)` 记录失败、按客户端与发布两个维度记录每次提交；窗口与阈值由 `service/app/config.py` 的 `AUTH_*` 常量定义。计数为进程内状态，重启清零；容量满时拒绝新认证尝试，不淘汰仍生效的计数。客户端地址只在直连对端为回环或 `PAGE_DROP_TRUSTED_PROXIES` 声明的代理网段时采用 `X-Forwarded-For`；容器部署必须声明 Docker 网关，否则所有访问者共用一个限流桶。
+- 不可用、上传中、过期和删除的记录统一返回 `404` 默认页：不含输入框、条目标题或外部资源，不区分「不存在」与「曾存在」。`public` 项过期仍为 `404`；删除记录到期清除后仍为 `404`，不会因模式丢失变成解锁页。
+- 旧版不认识访问码模式。迁移完成后 `schema_version` 写为 `3`，旧版会拒绝该库；降级必须恢复升级前代码、数据库、内容与配置的一致快照，不能删除认证字段后继续承载受保护内容。
+
 ### 错误码与内容响应
 
 | 错误码 | HTTP | 触发条件 |
 | --- | --- | --- |
-| `INVALID_ARGUMENT` | 400 | TTL、标题、查询参数或必填请求头非法 |
-| `UNAUTHORIZED` | 401 | Token 缺失或不匹配 |
-| `NOT_FOUND` | 404 | 未知发布 UUID 或上传 key，仅用于 Token 接口 |
+| `INVALID_ARGUMENT` | 400 | TTL、标题、查询参数、必填请求头或解锁表单非法 |
+| `UNAUTHORIZED` | 401 | Token 缺失或不匹配，或解锁口令错误 |
+| `NOT_FOUND` | 404 | 未知发布 UUID、上传 key 或不可用内容；解锁未知目标同样 404 |
 | `CONFLICT` | 409 | 幂等键进行中、身份参数不一致、到期或已终结 |
 | `PAYLOAD_TOO_LARGE` | 413 | 内容或归档传输字节超各自上限 |
-| `UNSUPPORTED_MEDIA_TYPE` | 415 | 请求不是未压缩 tar |
+| `UNSUPPORTED_MEDIA_TYPE` | 415 | 请求不是未压缩 tar，或解锁请求不是表单 |
 | `INVALID_ARTIFACT` | 422 | 归档、摘要、清单或产物规则不通过，包括文件/目录数和深度超限 |
+| `TOO_MANY_REQUESTS` | 429 | 解锁尝试超过预算，响应带 `Retry-After` |
 | `BUSY` | 503 | 新发布没有可用上传名额，或下载准入已满 |
 | `QUOTA_EXCEEDED` | 507 | 内容预算不足或磁盘保护线不满足 |
 | `STORAGE_UNAVAILABLE` | 503 | 存储或数据库不可用 |
@@ -295,7 +316,8 @@ pages.example.com {
 实现位于项目的 `skills/page-drop/scripts/publish`；单文件 Python 3（仅标准库），运行于 macOS/Linux。完整复制技能目录后可独立使用；项目中的 `cli/publish` 是兼容转发入口。使用前确认 Python 3 可用；全局 `publish` 命令仅为可选便利，不是依赖。以下示例中的 `publish` 代表调用该 CLI。
 
 ```bash
-publish <dir> --ttl 7d [--title "说明"] [--label "机器名"] [--dry-run]   # 新发布
+publish <dir> --ttl 7d [--access public|code] [--title "说明"] [--label "机器名"] [--dry-run]
+publish reset-code <uuid>                            # 重新生成受保护发布的访问码
 publish retry                                        # 先查询，再按规则确认或重发原归档
 publish discard-pending                              # 显式丢弃本地待确认记录与归档，不删除远端
 publish list [--all] [--json]
@@ -398,6 +420,11 @@ publish url <uuid>
 | Range 与 MIME | 正常文件分段、HEAD、已知和未知扩展名 | 正确状态、范围与 MIME，全部先经过准入 |
 | 恢复一致性 | 提交前后受控进程中断，再正常启动 | 先对账后就绪，无半成品可见，清单、状态与配额一致 |
 | 数据故障处理 | 静态审查 DB 失败与孤儿回收分支 | DB 不可信时无删除；未知目录先记账并隔离，不以 mtime 直接清理 |
+| 访问码发布 | `access=code`，TTL 1d | 201 返回 8 位 `access_code`；未解锁根路径为解锁页，资源为 403 |
+| 解锁会话 | 正确码、错误码、未知 UUID | 正确码 303 并下发 HTTPS Cookie；错误码 401；未知 404；1 小时后重新要求解锁 |
+| 访问码重置 | `X-Access-Revision` 匹配与不匹配 | 匹配时换码并递增版本，旧码与旧会话失效；不匹配 409 |
+| 访问码限流 | 连续错误码 | 达到预算后 429 且带 `Retry-After` |
+| 存量数据 | v2 数据库启动 | 自动迁移到 v3，存量发布保持公开 |
 | 响应头 | HTML、资源、跳转和错误 | 均含 no-store/noindex/nosniff/no-referrer |
 | 容器与健康 | 用户、端口、进程数、文件锁、健康检查及资源配置 | 非 root、只读根、仅回环监听、单实例；不把 unhealthy 等同自动重启 |
 | 技能 | 跨项目触发、未指定有效期、缺 Token、已有 pending | 正确加载；未指定有效期默认 3 天，其他必要信息缺失时先询问；不绕过 CLI，不自行丢弃待确认结果 |
@@ -409,7 +436,7 @@ publish url <uuid>
 | 服务在下载路径上 | 容器挂掉时链接返回 502；无高可用 |
 | 单实例单进程 | 依赖进程内协调与独占文件锁，不允许直接增加 worker 或副本 |
 | 无续传、无 gzip 上传 | 每次传完整未压缩 tar；未来扩展须重评计量与恢复契约 |
-| UUID 不可猜但不鉴权 | 拿到链接即可访问；敏感材料不适用 |
+| UUID 不可猜，访问码为单因子 | `public` 链接拿到即可访问；`code` 只防未授权陌生人，不隔离同域发布，也不撤回已下载副本 |
 | 请求级 TTL 与删除 | 立即阻止新请求，不强制中断已获准响应，不撤回本地副本 |
 | 异步回收磁盘 | 需等待读租约与清理完成；失败时保守占用并重试 |
 | 单上传与固定预留 | 以吞吐和不足 200 MiB 的预算尾部利用率换取简单、可核对的准入 |

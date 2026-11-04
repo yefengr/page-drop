@@ -101,3 +101,60 @@ NOT_FOUND = _page(
     "这个链接过期了，或者从未存在。",
     "好吧，它真的不在了。",
 )
+
+
+# 解锁页只用于仍可用的受保护发布；不可用链接继续使用 NOT_FOUND，避免泄露条目信息。
+UNLOCK = Template("""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive, noimageindex">
+<title>需要访问码 · PageDrop</title>
+<link rel="icon" href="$favicon">
+<style>
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px;
+  background: #f5f6f8; color: #171b21;
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+}
+form { width: min(100%, 320px); }
+label { display: block; margin-bottom: 10px; font-size: 14px; font-weight: 600; }
+input {
+  width: 100%; padding: 12px 14px; border: 1px solid #cfd5db; border-radius: 10px;
+  background: #fff; color: inherit; font: 500 18px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .18em; text-transform: uppercase;
+}
+input:focus-visible { outline: 2px solid #0d5f54; outline-offset: 2px; border-color: #0d5f54; }
+button {
+  width: 100%; margin-top: 12px; padding: 11px 14px; border: 0; border-radius: 10px;
+  background: #0d5f54; color: #fff; font: 600 15px/1.4 inherit; cursor: pointer;
+}
+button:hover { background: #0a4b42; }
+button:focus-visible { outline: 2px solid #0d5f54; outline-offset: 3px; }
+.hint { margin: 18px 0 0; color: #5d6873; font-size: 13px; line-height: 1.7; }
+.error {
+  margin: 14px 0 0; padding: 9px 12px; border-radius: 8px;
+  background: #f7ece8; color: #8a4230; font-size: 13px;
+}
+</style>
+</head>
+<body>
+<form method="post" action="_unlock">
+  <label for="code">访问码</label>
+  <input id="code" name="code" type="text" autocomplete="off" autocapitalize="characters"
+         spellcheck="false" maxlength="64" required autofocus>
+  <button type="submit">继续</button>
+  $error
+  <p class="hint">本链接需要访问码；如果不知道口令，请向分享者索取。</p>
+</form>
+</body>
+</html>
+""")
+
+
+def unlock(error=""):
+    message = ('<p class="error" role="alert">' + error + "</p>") if error else ""
+    return UNLOCK.substitute(favicon=FAVICON, error=message)

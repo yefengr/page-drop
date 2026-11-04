@@ -16,7 +16,9 @@ def test_publish_and_exact_manifest(client):
     data = result.json()
     item_id = data["id"]
     assert uuid.UUID(item_id).version == 4
-    assert set(data) == {"id", "url", "expires_at", "created_at", "bytes", "file_count"}
+    assert set(data) == {"id", "url", "expires_at", "created_at", "bytes", "file_count",
+                         "access_mode", "access_revision"}
+    assert data["access_mode"] == "public" and data["access_revision"] == 0
     assert data["expires_at"] - data["created_at"] == 600
     assert data["bytes"] == len(b"<h1>Hello</h1>body{}")
     assert data["file_count"] == 2

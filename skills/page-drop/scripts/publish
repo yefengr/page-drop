@@ -280,6 +280,22 @@ class ValidatedResult(dict):
     """仅成功结果校验器产生的结果可进入本地成功收尾。"""
 
 
+ACCESS_MODES = ("public", "code")
+ACCESS_CODE_RE = re.compile(r"[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}")
+
+
+def validate_access_fields(data):
+    mode = data.get("access_mode", "public")
+    revision = data.get("access_revision", 0)
+    if mode not in ACCESS_MODES:
+        fail("服务端成功结果的 access_mode 非法")
+    if type(revision) is not int or revision < 0 or (mode == "public") != (revision == 0):
+        fail("服务端成功结果的 access_revision 非法")
+    code = data.get("access_code")
+    if code is not None and (mode != "code" or not isinstance(code, str)
+                             or ACCESS_CODE_RE.fullmatch(code) is None):
+        fail("服务端成功结果的 access_code 非法")
+
 def validate_success(data):
     if not isinstance(data, dict):
         fail("服务端成功结果必须是 JSON 对象")
@@ -325,6 +341,7 @@ def validate_success(data):
                 fail(f"服务端成功结果的 {name} 无法表示")
     if data["expires_at"] <= data["created_at"]:
         fail("服务端成功结果的到期时间必须晚于创建时间")
+    validate_access_fields(data)
     return ValidatedResult(data)
 
 
@@ -336,7 +353,8 @@ def validate_confirmation(data, record):
             or type(data.get("ttl_seconds")) is not int
             or data["ttl_seconds"] != parse_ttl(record["ttl"])
             or data.get("title") != record["title"]
-            or data.get("label") != record.get("label", "")):
+            or data.get("label") != record.get("label", "")
+            or data.get("access_mode", "public") != record.get("access", "public")):
         fail("服务端记录与本地待确认参数不一致", "CONFLICT")
     return validate_success(data)
 
@@ -630,7 +648,9 @@ def append_history(record):
     path = state_paths()["history"]
     with open(path, "a+b") as handle:
         os.fchmod(handle.fileno(), 0o600)
-        found = scan_history(handle, key=record["key"], identifier=record["id"])
+        # 重置凭据是独立事件：同一条发布必须能追加新版本，不能按发布 ID 吞掉更新。
+        identifier = record["id"] if record.get("operation", "publish") == "publish" else None
+        found = scan_history(handle, key=record["key"], identifier=identifier)
         if found is None:
             handle.write((json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
         handle.flush()
@@ -644,6 +664,8 @@ def print_result(result, as_json=False):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     print(result.get("url"))
+    if result.get("access_mode") == "code" and result.get("access_code"):
+        print("access   " + result["access_code"])
     expires = result.get("expires_at")
     if expires:
         print("expires  " + datetime.fromtimestamp(expires, timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
@@ -659,6 +681,7 @@ def upload(config, record):
         }
         query = urllib.parse.urlencode({
             "ttl": record["ttl"], "title": record["title"], "label": record.get("label", ""),
+            "access": record.get("access", "public"),
         })
         status, _, payload = request(
             config, "POST", "/api/v1/publishes?" + query, body=handle, headers=headers,
@@ -675,6 +698,9 @@ def cmd_publish(args, config):
     label = (args.label or "").strip()
     if len(label) > 64 or any(ord(ch) < 32 or ord(ch) == 127 for ch in label):
         fail("label 最多 64 个字符，且不能包含控制字符")
+    access = args.access or "public"
+    if access not in ACCESS_MODES:
+        fail("--access 只接受 public 或 code")
     if not args.dry_run:
         base_parts(config["base_url"])
 
@@ -705,6 +731,7 @@ def cmd_publish(args, config):
                 "ttl": args.ttl,
                 "title": title,
                 "label": label,
+                "access": access,
                 "source_dir": str(root),
                 "first_attempt_at": iso(now_utc()),
             }
@@ -717,6 +744,11 @@ def cmd_publish(args, config):
                 os.unlink(tmp_path)
 
         result = upload(config, record)
+        # 先把明文写回 pending：即使本地收尾失败，也不会丢失服务端只返回一次的授权码。
+        if result.get("access_code"):
+            record["access_code"] = result["access_code"]
+            record["access_revision"] = result.get("access_revision")
+            save_pending(record)
         finalize(result, record)
         print_result(result, args.json)
     return 0
@@ -736,6 +768,9 @@ def finalize(result, record):
         "ttl": record.get("ttl"),
         "title": record.get("title"),
         "label": record.get("label", ""),
+        "access_mode": result.get("access_mode", "public"),
+        "access_revision": result.get("access_revision", 0),
+        "access_code": result.get("access_code"),
         "archive_sha256": record.get("archive_sha256"),
         "published_at": iso(now_utc()),
     })
@@ -749,6 +784,8 @@ def cmd_retry(args, config):
             fail("没有待确认的上传记录")
         if record.get("base_url") != config["base_url"]:
             fail("配置目标与待确认记录不一致：拒绝把原归档发到另一个服务", "CONFLICT")
+        if record.get("operation") == "reset-code":
+            return retry_reset(record, config, args.json)
         confirmed = confirmed_history(record)
         status, _, payload = request(config, "GET", "/api/v1/uploads/" + record["key"])
         if status == 200:
@@ -757,8 +794,9 @@ def cmd_retry(args, config):
                 fail("服务端上传查询必须返回 JSON 对象")
             if data.get("state") == "committed" or data.get("available") is not False:
                 result = validate_confirmation(data, record)
-                finalize(result, record)
-                print_result(result, args.json)
+                merged = resumed_result(result, record)
+                finalize(merged, record)
+                print_result(merged, args.json)
                 return 0
             if data.get("state") == "uploading":
                 print("上传仍在服务端处理中，稍后再执行 publish retry", file=sys.stderr)
@@ -769,9 +807,10 @@ def cmd_retry(args, config):
             fail(f"{code}: {message}" if code else message, code)
 
         if confirmed is not None:
-            finalize(confirmed, record)
+            merged = resumed_result(confirmed, record)
+            finalize(merged, record)
             print("已从本地成功记录完成收尾；不代表远端仍可访问，不会重新上传。", file=sys.stderr)
-            print_result(confirmed, args.json)
+            print_result(merged, args.json)
             return 0
         try:
             attempted = parse_iso(record["first_attempt_at"])
@@ -791,6 +830,149 @@ def cmd_retry(args, config):
         finalize(result, record)
         print_result(result, args.json)
     return 0
+
+
+def resumed_result(result, record):
+    """合并本地保存的授权码；缺失时保留待恢复状态而不是假装成功。"""
+    merged = ValidatedResult(dict(result))
+    if merged.get("access_mode") == "code":
+        code = record.get("access_code")
+        if not code or record.get("access_revision") != merged.get("access_revision"):
+            print(f"发布已提交，但本地没有当前版本的授权码。链接：{merged.get('url')}", file=sys.stderr)
+            print(f"如需恢复访问，请执行：publish reset-code {merged.get('id')}", file=sys.stderr)
+            print("待确认记录已保留，不会重新上传内容。", file=sys.stderr)
+            raise CliError("授权码待恢复")
+        merged["access_code"] = code
+    return merged
+
+
+def pending_owner(pending, item_id, config):
+    """只允许接续同一发布的待确认上传，不覆盖其他目标。"""
+    if not pending:
+        return None
+    if pending.get("base_url") != config["base_url"]:
+        fail("已有其他目标的待确认操作；先处理它", "CONFLICT")
+    if pending.get("operation") == "reset-code":
+        if pending.get("id") != item_id:
+            fail("已有其他发布的待确认重置；先处理它", "CONFLICT")
+        return None
+    status, _, payload = request(config, "GET", "/api/v1/uploads/" + pending["key"])
+    if status != 200:
+        fail("原待确认上传无法确认；先处理 pending", "CONFLICT")
+    uploaded = json_or_fail(status, payload, (200,))
+    if not isinstance(uploaded, dict) or uploaded.get("id") != item_id:
+        fail("已有其他发布的待确认上传；先处理它", "CONFLICT")
+    return pending
+
+
+def cmd_reset_code(args, config):
+    """显式换码：先用服务端当前版本作条件，响应不确定时保留待确认记录。"""
+    with StateLock():
+        base_parts(config["base_url"])
+        status, _, payload = request(config, "GET", "/api/v1/publishes/" + args.uuid)
+        data = json_or_fail(status, payload, (200,))
+        if not isinstance(data, dict):
+            fail("服务端状态必须是 JSON 对象")
+        if data.get("access_mode") != "code":
+            fail("该发布不是受保护发布", "CONFLICT")
+        if not data.get("available"):
+            fail("该发布当前不可访问", "CONFLICT")
+        revision = data.get("access_revision")
+        if type(revision) is not int or revision <= 0:
+            fail("服务端访问码版本非法")
+        # 同一发布的待确认上传可以在换码后一并收尾，这是方案要求的恢复路径。
+        publish_pending = pending_owner(load_pending(), data["id"], config)
+        record = {
+            "operation": "reset-code",
+            "id": data["id"],
+            # 服务端响应异常时仍保留原发布恢复线索，不因换码记录覆盖而丢失。
+            "resume": publish_pending,
+            "base_url": config["base_url"],
+            "expected_revision": revision,
+            "first_attempt_at": iso(now_utc()),
+        }
+        save_pending(record)
+        status, _, payload = request(
+            config, "POST", f"/api/v1/publishes/{args.uuid}/access",
+            headers={"X-Access-Revision": str(revision)},
+        )
+        if status != 200:
+            clear_pending()
+            if publish_pending:
+                save_pending(publish_pending)
+            code, message = parse_error(status, payload)
+            fail(f"{code}: {message}" if code else message, code)
+        result = json_or_fail(status, payload, (200,))
+        if not isinstance(result, dict) or result.get("access_revision") != revision + 1:
+            save_pending(record)
+            fail("服务端返回的访问码版本不符，保留待确认记录", "CONFLICT")
+        code = result.get("access_code")
+        if not isinstance(code, str) or ACCESS_CODE_RE.fullmatch(code) is None:
+            save_pending(record)
+            fail("服务端返回的访问码非法，保留待确认记录", "CONFLICT")
+        if publish_pending:
+            # 先把新码写回原发布待确认记录，收尾失败时仍可继续。
+            publish_pending["access_revision"] = result["access_revision"]
+            publish_pending["access_code"] = code
+            save_pending(publish_pending)
+            merged = ValidatedResult({**data, "access_code": code,
+                                      "access_revision": result["access_revision"]})
+            finalize(merged, publish_pending)
+            print_result(merged, args.json)
+        else:
+            record["access_revision"] = result["access_revision"]
+            record["access_code"] = code
+            save_pending(record)
+            finish_reset(record, args.json)
+    return 0
+
+
+def finish_reset(record, as_json):
+    result = {"id": record["id"], "access_mode": "code",
+              "access_revision": record["access_revision"],
+              "access_code": record["access_code"]}
+    append_history({
+        "operation": "reset-code",
+        "key": f"reset:{record['id']}:{result['access_revision']}",
+        **result,
+        "published_at": iso(now_utc()),
+    })
+    clear_pending()
+    if as_json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print("新的访问码  " + result["access_code"])
+        print("该发布此前的解锁会话已不再有效。")
+
+
+def retry_reset(record, config, as_json):
+    status, _, payload = request(config, "GET", "/api/v1/publishes/" + record["id"])
+    if status == 404:
+        fail("该发布已不可访问，不复活旧项", "CONFLICT")
+    if status != 200:
+        code, message = parse_error(status, payload)
+        fail(f"{code}: {message}" if code else message, code)
+    data = json_or_fail(status, payload, (200,))
+    if not isinstance(data, dict):
+        fail("服务端状态必须是 JSON 对象")
+    current = data.get("access_revision")
+    if type(current) is not int or current <= 0:
+        fail("服务端访问码版本非法")
+    expected = record.get("expected_revision")
+    if current == expected:
+        print("重置尚未生效；待确认记录保留，可稍后重试。", file=sys.stderr)
+        return 0
+    if current == expected + 1 and record.get("access_code") and record.get("access_revision") == current:
+        resume = record.get("resume")
+        if isinstance(resume, dict) and resume.get("key"):
+            merged = ValidatedResult({**data, "access_code": record["access_code"],
+                                      "access_revision": current})
+            finalize(merged, resume)
+            print_result(merged, as_json)
+        else:
+            finish_reset(record, as_json)
+        return 0
+    fail("版本已变化但本地没有对应授权码；请重新执行 publish reset-code <uuid>", "CONFLICT")
 
 
 def cmd_discard(args, config):
@@ -832,6 +1014,8 @@ def cmd_status(args, config):
     print(f"id        {data.get('id')}")
     print(f"state     {data.get('state')}")
     print(f"available {'yes' if data.get('available') else 'no'}")
+    if data.get("access_mode") == "code":
+        print(f"access    code (revision {data.get('access_revision')})")
     if data.get("label"):
         print(f"label     {data['label']}")
     if data.get("available") and data.get("url"):
@@ -862,13 +1046,16 @@ def cmd_rm(args, config):
 def build_parser(management=False):
     parser = argparse.ArgumentParser(
         prog="publish", description="PageDrop 发布工具",
-        usage="publish <dir> --ttl TTL [--title TITLE] [--label LABEL] [--dry-run] [--json]\n"
-              "       publish {retry,list,status,url,rm,discard-pending} ...",
-        epilog="管理命令：retry / list / status / url / rm / discard-pending。"
+        usage="publish <dir> --ttl TTL [--access public|code] [--title TITLE] [--label LABEL]\n"
+              "       [--dry-run] [--json]\n"
+              "       publish {retry,list,status,url,rm,reset-code,discard-pending} ...",
+        epilog="管理命令：retry / list / status / url / rm / reset-code / discard-pending。"
                "发布目录与管理命令重名时请使用 ./retry 等显式路径。")
     if not management:
         parser.add_argument("directory", nargs="?", help="要发布的静态目录")
         parser.add_argument("--ttl")
+        parser.add_argument("--access", default="public",
+                            help="public 直接访问；code 需要服务端生成的访问码")
         parser.add_argument("--title", default="")
         parser.add_argument("--label", default="", help="发布者标签，仅用于追溯")
         parser.add_argument("--dry-run", action="store_true")
@@ -879,6 +1066,11 @@ def build_parser(management=False):
     retry = sub.add_parser("retry", help="确认或重发上一次未确认的上传")
     retry.add_argument("--json", action="store_true")
     retry.set_defaults(func=cmd_retry)
+
+    reset = sub.add_parser("reset-code", help="重新生成受保护发布的访问码")
+    reset.add_argument("uuid")
+    reset.add_argument("--json", action="store_true")
+    reset.set_defaults(func=cmd_reset_code)
 
     discard = sub.add_parser("discard-pending", help="丢弃本地待确认记录")
     discard.set_defaults(func=cmd_discard)
@@ -905,7 +1097,7 @@ def build_parser(management=False):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    management = {"retry", "list", "status", "url", "rm", "discard-pending"}
+    management = {"retry", "list", "status", "url", "rm", "reset-code", "discard-pending"}
     parser = build_parser(management=bool(argv and argv[0] in management))
     args = parser.parse_args(argv)
     if getattr(args, "func", None) is cmd_publish and not args.directory:

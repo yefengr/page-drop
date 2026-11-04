@@ -31,6 +31,8 @@ python3 "<当前技能目录>/scripts/publish" --help
 - `--title` 为可选标题，`--label` 为可选追溯标签，均默认空；label 最多 64 个字符，不含控制字符。
 - 目录带空格时使用 shell 引号。目录名若与管理命令重名，例如 `retry`，使用 `./retry` 或绝对路径。
 - 支持 `--json` 的命令优先使用它，仍须检查 stderr。`url`、`rm`、`discard-pending` 不支持该参数。
+- `--access` 只接受 `public`（默认）与 `code`。`code` 的授权码由服务端生成，不接受客户端指定；8 位明文只在本次成功响应中出现一次，必须立即保存，查询与幂等复用都不会再次返回。
+- 会话固定 1 小时且不超过发布剩余 TTL。访问码丢失或外泄时用 `reset-code <uuid>` 显式换码；该操作会让此前的解锁会话失效，不改变内容、URL 或 TTL。发布已成功但本地没有保存授权码时，`retry` 会保留待确认记录并提示显式重置，不会静默换码。
 - 下列命令是独立示例，不是依次运行的脚本；发布、retry、删除与丢弃都必须分别满足主技能中的授权条件。
 
 仅本地预检：
@@ -43,6 +45,10 @@ python3 "<当前技能目录>/scripts/publish" ./dist --ttl 3d --dry-run --json
 
 ```bash
 python3 "<当前技能目录>/scripts/publish" ./dist --ttl 3d --title "评审稿" --label "评审机" --json
+# 需要访问码保护时；服务端生成，明文只输出这一次
+python3 "<当前技能目录>/scripts/publish" ./dist --ttl 3d --access code --json
+# 访问码丢失或外泄后显式换码；旧解锁会话随之失效
+python3 "<当前技能目录>/scripts/publish" reset-code <uuid> --json
 ```
 
 查询与取回链接：

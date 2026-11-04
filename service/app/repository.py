@@ -20,11 +20,15 @@ class Repository:
         with self.db.connect() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM items ORDER BY upload_started_at, id")]
 
-    def insert(self, item_id, key, now, ttl, title, digest, label=""):
+    def insert(self, item_id, key, now, ttl, title, digest, label="",
+               access_mode="public", access_hash=None, access_revision=0):
         with self.db.connect() as conn:
             conn.execute("""INSERT INTO items
-                (id,idempotency_key,upload_started_at,ttl_seconds,title,label,archive_sha256,state)
-                VALUES (?,?,?,?,?,?,?,'uploading')""", (item_id, key, now, ttl, title, label, digest))
+                (id,idempotency_key,upload_started_at,ttl_seconds,title,label,archive_sha256,
+                 access_mode,access_hash,access_revision,state)
+                VALUES (?,?,?,?,?,?,?,?,?,?,'uploading')""",
+                (item_id, key, now, ttl, title, label, digest,
+                 access_mode, access_hash, access_revision))
 
     def checkpoint(self, item_id, archive_bytes, manifest):
         with self.db.connect() as conn:
@@ -70,3 +74,19 @@ class Repository:
     def purge(self, cutoff):
         with self.db.connect() as conn:
             conn.execute("DELETE FROM items WHERE state='deleted' AND deleted_at<=?", (cutoff,))
+
+    def has_protected(self):
+        """存在仍可访问的受保护发布时，缺失会话密钥必须拒绝就绪。"""
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM items WHERE access_mode='code' AND state='committed' LIMIT 1").fetchone()
+            return row is not None
+
+    def replace_access(self, item_id, expected_revision, access_hash):
+        """仅当仍处于同一认证版本且可访问时换码；条件更新保证同版本只生效一次。"""
+        with self.db.connect() as conn:
+            cursor = conn.execute(
+                """UPDATE items SET access_hash=?, access_revision=access_revision+1
+                   WHERE id=? AND access_revision=? AND state='committed' AND access_mode='code'""",
+                (access_hash, item_id, expected_revision))
+            return cursor.rowcount == 1

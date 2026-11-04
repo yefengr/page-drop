@@ -304,7 +304,9 @@ def test_response_already_started_finishes_after_delete(client):
     current = service(client)
 
     async def scenario():
-        handle, entry = await current.admit(item_id, "index.html")
+        status, value = await current.admit(item_id, "index.html")
+        assert status == "ok"
+        handle, entry = value
         started, resume, never = asyncio.Event(), asyncio.Event(), asyncio.Event()
         messages = []
 
@@ -323,7 +325,7 @@ def test_response_already_started_finishes_after_delete(client):
         await current.delete(item_id)
         await current.cleanup(item_id)
         assert current.ledger.total > 0
-        assert await current.admit(item_id, "index.html") is None
+        assert await current.admit(item_id, "index.html") == ("missing", None)
         resume.set()
         await task
         assert b"".join(m.get("body", b"") for m in messages) == b"<h1>Hello</h1>"
@@ -339,7 +341,9 @@ def test_response_idle_timeout_releases_lease(client, monkeypatch):
     monkeypatch.setattr(C, "DOWNLOAD_IDLE_TIMEOUT", 0)
 
     async def scenario():
-        handle, entry = await current.admit(item_id, "index.html")
+        status, value = await current.admit(item_id, "index.html")
+        assert status == "ok"
+        handle, entry = value
         never = asyncio.Event()
 
         async def send(_):
@@ -361,7 +365,9 @@ def test_response_disconnect_releases_lease(client):
     current = service(client)
 
     async def scenario():
-        handle, entry = await current.admit(item_id, "index.html")
+        status, value = await current.admit(item_id, "index.html")
+        assert status == "ok"
+        handle, entry = value
         never = asyncio.Event()
 
         async def send(_):

@@ -36,7 +36,9 @@ def test_delete_and_retention(client, clock):
 def test_inflight_lease_retains_accounting(client, clock):
     item_id = post(client).json()["id"]
     current = service(client)
-    handle, entry = client.portal.call(current.admit, item_id, "index.html")
+    status, admitted = client.portal.call(current.admit, item_id, "index.html")
+    assert status == "ok"
+    handle, entry = admitted
     size = current.ledger.total
     clock.advance(600)
     assert client.get(f"/{item_id}/").status_code == 404
@@ -207,8 +209,8 @@ def test_live_upload_busy_idempotency_slow_clock_and_maintenance(client, clock):
             await current.check_storage()
         finally:
             resume.set()
-        result, fresh = await task
-        assert fresh and result["created_at"] == clock.now()
+        result, fresh, code = await task
+        assert fresh and code is None and result["created_at"] == clock.now()
         assert result["expires_at"] - clock.now() == 600
         assert current.ledger.total == result["bytes"]
 
@@ -248,7 +250,9 @@ def test_download_limit_and_health_independence(client, monkeypatch):
     item_id = post(client).json()["id"]
     current = service(client)
     monkeypatch.setattr(C, "MAX_DOWNLOADS", 1)
-    handle, _ = client.portal.call(current.admit, item_id, "index.html")
+    status, admitted = client.portal.call(current.admit, item_id, "index.html")
+    assert status == "ok"
+    handle, _ = admitted
     try:
         assert client.get(f"/{item_id}/").status_code == 503
         assert client.get("/healthz").status_code == 200
@@ -300,8 +304,8 @@ def test_schema_migrates_old_database(tmp_path):
     Database(path).initialize()
     with sqlite3.connect(path) as check:
         columns = {row[1] for row in check.execute("PRAGMA table_info(items)")}
-        assert "label" in columns
+        assert {"label", "access_mode", "access_hash", "access_revision"} <= columns
         row = check.execute("SELECT label, state FROM items WHERE id='old-id'").fetchone()
         assert row == ("", "deleted")
         version = check.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        assert version == "2"
+        assert version == "3"
